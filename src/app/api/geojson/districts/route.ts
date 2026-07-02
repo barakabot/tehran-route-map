@@ -1,22 +1,21 @@
 import { NextResponse } from 'next/server';
-import fs from 'fs';
-import path from 'path';
+import { db } from '@/lib/db';
 
 export async function GET() {
-  const filePath = path.join(process.cwd(), 'upload', 'tehran_districts.geojson');
-  const fileContent = fs.readFileSync(filePath, 'utf-8');
-  const data = JSON.parse(fileContent);
+  const districts = await db.district.findMany({
+    orderBy: { districtNumber: 'asc' },
+  });
 
-  const districts = data.features.map((f: Record<string, unknown>) => ({
-    name: (f.properties as Record<string, string>).name,
-    district_number: (f.properties as Record<string, number>).district_number,
-    geometry: f.geometry,
+  const result = districts.map((d) => ({
+    name: d.name,
+    district_number: d.districtNumber,
+    geometry: JSON.parse(d.geometry),
   }));
 
-  const names = data.features.map((f: Record<string, unknown>) => ({
-    name: (f.properties as Record<string, string>).name,
-    district_number: (f.properties as Record<string, number>).district_number,
+  const names = districts.map((d) => ({
+    name: d.name,
+    district_number: d.districtNumber,
   }));
 
-  return NextResponse.json({ districts, names });
+  return NextResponse.json({ districts: result, names });
 }

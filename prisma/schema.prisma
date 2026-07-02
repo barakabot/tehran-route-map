@@ -29,11 +29,17 @@ model Customer {
 }
 
 model Route {
-  id        String   @id @default(cuid())
-  name      String   @unique
-  color     String   @default("")
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                String   @id @default(cuid())
+  name              String   @unique
+  color             String   @default("")
+  geometry          String   @default("")  // JSON string of GeoJSON Polygon
+  customerCount     Int      @default(0)
+  coreCustomerCount Int      @default(0)
+  outlierCount      Int      @default(0)
+  salesOffice       String   @default("")
+  distributionCenter String  @default("")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 }
 
 model District {

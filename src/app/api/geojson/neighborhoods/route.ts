@@ -1,35 +1,32 @@
 import { NextResponse } from 'next/server';
-import fs from 'fs';
-import path from 'path';
+import { db } from '@/lib/db';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const district = searchParams.get('district');
 
-  const filePath = path.join(process.cwd(), 'upload', 'tehran_neighborhoods.geojson');
-  const fileContent = fs.readFileSync(filePath, 'utf-8');
-  const data = JSON.parse(fileContent);
-
-  let features = data.features;
+  const where: Record<string, unknown> = {};
   if (district) {
-    features = features.filter(
-      (f: Record<string, unknown>) =>
-        (f.properties as Record<string, string>).district_name === district
-    );
+    where.districtName = district;
   }
 
-  const neighborhoods = features.map((f: Record<string, unknown>) => ({
-    name: (f.properties as Record<string, string>).name,
-    district_number: (f.properties as Record<string, number>).district_number,
-    district_name: (f.properties as Record<string, string>).district_name,
-    geometry: f.geometry,
+  const neighborhoods = await db.neighborhood.findMany({
+    where,
+    orderBy: { name: 'asc' },
+  });
+
+  const result = neighborhoods.map((n) => ({
+    name: n.name,
+    district_number: n.districtNumber,
+    district_name: n.districtName,
+    geometry: JSON.parse(n.geometry),
   }));
 
-  const names = features.map((f: Record<string, unknown>) => ({
-    name: (f.properties as Record<string, string>).name,
-    district_name: (f.properties as Record<string, string>).district_name,
-    district_number: (f.properties as Record<string, number>).district_number,
+  const names = neighborhoods.map((n) => ({
+    name: n.name,
+    district_name: n.districtName,
+    district_number: n.districtNumber,
   }));
 
-  return NextResponse.json({ neighborhoods, names });
+  return NextResponse.json({ neighborhoods: result, names });
 }

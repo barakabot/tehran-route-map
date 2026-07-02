@@ -26,50 +26,15 @@ function pointInPolygon(x: number, y: number, coords: number[][]): boolean {
   return inside;
 }
 
-// Convex hull (Graham scan)
-function convexHull(points: number[][]): number[][] {
-  if (points.length < 3) return points.slice();
-  const pts = points.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-
-  function cross(O: number[], A: number[], B: number[]): number {
-    return (A[0] - O[0]) * (B[1] - O[1]) - (A[1] - O[1]) * (B[0] - O[0]);
-  }
-
-  const lower: number[][] = [];
-  for (const p of pts) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) {
-      lower.pop();
-    }
-    lower.push(p);
-  }
-
-  const upper: number[][] = [];
-  for (const p of pts.reverse()) {
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) {
-      upper.pop();
-    }
-    upper.push(p);
-  }
-
-  lower.pop();
-  upper.pop();
-  return lower.concat(upper);
-}
-
-// Pad a polygon ring outward by a small amount
-function padPolygon(ring: number[][], pad: number): number[][] {
-  return ring.map((point, i) => {
-    const prev = ring[(i - 1 + ring.length) % ring.length];
-    const next = ring[(i + 1) % ring.length];
-    // Direction from prev to next
-    const dx = next[0] - prev[0];
-    const dy = next[1] - prev[1];
-    const len = Math.sqrt(dx * dx + dy * dy) || 1;
-    // Normal (perpendicular)
-    const nx = -dy / len;
-    const ny = dx / len;
-    return [point[0] + nx * pad, point[1] + ny * pad];
-  });
+// Route block type
+interface RouteBlock {
+  name: string;
+  geometry: { type: string; coordinates: number[][][] };
+  customerCount: number;
+  coreCustomerCount: number;
+  outlierCount: number;
+  salesOffice: string;
+  distributionCenter: string;
 }
 
 export default function InteractiveMap() {
@@ -93,6 +58,7 @@ export default function InteractiveMap() {
   const [districtNames, setDistrictNames] = useState<Array<{ name: string; district_number: number }>>([]);
   const [neighborhoodNames, setNeighborhoodNames] = useState<Array<{ name: string; district_name: string; district_number: number }>>([]);
   const [routeNames, setRouteNames] = useState<string[]>([]);
+  const [routeBlocks, setRouteBlocks] = useState<RouteBlock[]>([]);
   const [showSidebar, setShowSidebar] = useState(true);
 
   const {
@@ -176,16 +142,18 @@ export default function InteractiveMap() {
   useEffect(() => {
     async function loadData() {
       try {
-        const [routesRes, distRes, neighRes, routeNamesRes] = await Promise.all([
+        const [routesRes, distRes, neighRes, routeNamesRes, routeBlocksRes] = await Promise.all([
           fetch('/api/geojson/routes'),
           fetch('/api/geojson/districts'),
           fetch('/api/geojson/neighborhoods'),
           fetch('/api/routes'),
+          fetch('/api/route-blocks'),
         ]);
         const routesData = await routesRes.json();
         const distData = await distRes.json();
         const neighData = await neighRes.json();
         const routeNamesData = await routeNamesRes.json();
+        const routeBlocksData = await routeBlocksRes.json();
 
         setCustomers(routesData.customers);
         setCustomerCount(routesData.customers.length);
@@ -194,6 +162,7 @@ export default function InteractiveMap() {
         setNeighborhoods(neighData.neighborhoods);
         setNeighborhoodNames(neighData.names);
         setRouteNames(routeNamesData.routes);
+        setRouteBlocks(routeBlocksData.routeBlocks || []);
         setLoading(false);
       } catch (err) {
         console.error('Failed to load data:', err);
@@ -270,76 +239,61 @@ export default function InteractiveMap() {
     });
   }, [neighborhoods, layers.neighborhoods, editMode, setSelectedNeighborhood]);
 
-  // Render route polygons (convex hull around customers of each route)
+  // Render route block polygons (from database - real polygons)
   useEffect(() => {
     const L = leafletRef.current;
     if (!L || !routeLayerRef.current) return;
     const rl = routeLayerRef.current as ReturnType<typeof L.layerGroup>;
     rl.clearLayers();
-    if (!layers.routes) return;
+    if (!layers.routes || routeBlocks.length === 0) return;
 
-    // Group customers by route
-    const routeGroups = new Map<string, Array<[number, number]>>();
-    customers.forEach((c) => {
-      if (!c.currentRoute) return;
-      const pts = routeGroups.get(c.currentRoute) || [];
-      pts.push([c.lng, c.lat]);
-      routeGroups.set(c.currentRoute, pts);
-    });
-
-    // Route colors - generate distinct colors using HSL
+    // Generate distinct colors using golden angle HSL
     const routeColorMap = new Map<string, string>();
-    let colorIdx = 0;
-    routeGroups.forEach((_, name) => {
-      const hue = (colorIdx * 137.508) % 360; // golden angle for good distribution
-      routeColorMap.set(name, `hsl(${hue}, 65%, 50%)`);
-      colorIdx++;
+    routeBlocks.forEach((rb, i) => {
+      const hue = (i * 137.508) % 360;
+      routeColorMap.set(rb.name, `hsl(${hue}, 65%, 50%)`);
     });
 
-    routeGroups.forEach((points, routeName) => {
-      if (points.length < 3) return;
+    routeBlocks.forEach((rb) => {
+      if (!rb.geometry?.coordinates?.[0]) return;
 
-      // Compute convex hull
-      const hull = convexHull(points);
-      if (hull.length < 3) return;
+      const color = routeColorMap.get(rb.name) || '#888';
 
-      // Close the hull ring
-      const ring = hull.map((p) => p as [number, number]);
-      ring.push(ring[0] as [number, number]);
-
-      // Pad the hull slightly for better visibility
-      const paddedRing = padPolygon(ring, 0.002);
-
-      const color = routeColorMap.get(routeName) || '#888';
-
-      const polygon = L.polygon(
-        paddedRing.map((p) => [p[1], p[0]] as [number, number]),
-        {
-          color: color,
-          weight: 2,
-          fillColor: color,
-          fillOpacity: 0.12,
-          opacity: 0.8,
-          dashArray: '6, 3',
-        }
+      // Convert GeoJSON [lng, lat] to Leaflet [lat, lng]
+      const latLngs = rb.geometry.coordinates[0].map(
+        (c) => [c[1], c[0]] as [number, number]
       );
 
-      const customerCount = points.length;
+      const polygon = L.polygon(latLngs, {
+        color: color,
+        weight: 2,
+        fillColor: color,
+        fillOpacity: 0.12,
+        opacity: 0.8,
+        dashArray: '6, 3',
+      });
+
       polygon.bindTooltip(
         `<div style="direction:rtl;text-align:right;font-size:12px;">
-          <strong>${routeName}</strong><br/>
-          <span style="color:#666;">تعداد مشتری: ${customerCount}</span>
+          <strong>${rb.name}</strong><br/>
+          <span style="color:#666;">تعداد مشتری: ${rb.customerCount}</span><br/>
+          <span style="color:#888;">هسته: ${rb.coreCustomerCount} | خارج: ${rb.outlierCount}</span>
+          ${rb.salesOffice ? `<br/><span style="color:#999;">دفتر: ${rb.salesOffice}</span>` : ''}
         </div>`,
         { sticky: true, direction: 'top', className: 'custom-tooltip' }
       );
 
       polygon.on('click', () => {
-        setSelectedRoute(routeName);
+        setSelectedRoute(rb.name);
       });
+
+      if (editMode === 'editPolygon') {
+        polygon.pm?.enable({ allowSelfIntersection: false });
+      }
 
       rl.addLayer(polygon);
     });
-  }, [customers, layers.routes, setSelectedRoute]);
+  }, [routeBlocks, layers.routes, editMode, setSelectedRoute]);
 
   // Get filtered customers
   const getFilteredCustomers = useCallback(() => {
