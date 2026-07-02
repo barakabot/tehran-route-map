@@ -47,6 +47,10 @@ interface MapStore {
   // Search
   searchQuery: string;
   setSearchQuery: (q: string) => void;
+
+  // Source filter
+  selectedSource: string;
+  setSelectedSource: (s: string) => void;
 }
 
 export const useMapStore = create<MapStore>((set) => ({
@@ -98,6 +102,7 @@ export const useMapStore = create<MapStore>((set) => ({
       selectedDistrict: '',
       selectedNeighborhood: '',
       selectedRoute: '',
+      selectedSource: '',
     }),
 
   userLocation: null,
@@ -112,4 +117,7 @@ export const useMapStore = create<MapStore>((set) => ({
 
   searchQuery: '',
   setSearchQuery: (q) => set({ searchQuery: q }),
+
+  selectedSource: '',
+  setSelectedSource: (s) => set({ selectedSource: s }),
 }));

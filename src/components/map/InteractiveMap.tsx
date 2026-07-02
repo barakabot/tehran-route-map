@@ -53,6 +53,7 @@ export default function InteractiveMap() {
   const [editDialog, setEditDialog] = useState<{ open: boolean; customer: CustomerPoint | null; lat: number; lng: number }>({ open: false, customer: null, lat: 0, lng: 0 });
   const [batchDialog, setBatchDialog] = useState(false);
   const [batchText, setBatchText] = useState('');
+  const [batchSource, setBatchSource] = useState('ورانگر');
   const [districts, setDistricts] = useState<Array<{ name: string; district_number: number; geometry: Record<string, unknown> }>>([]);
   const [neighborhoods, setNeighborhoods] = useState<Array<{ name: string; district_name: string; geometry: Record<string, unknown> }>>([]);
   const [districtNames, setDistrictNames] = useState<Array<{ name: string; district_number: number }>>([]);
@@ -74,6 +75,7 @@ export default function InteractiveMap() {
     selectedDistrict, selectedNeighborhood, selectedRoute,
     setSelectedDistrict, setSelectedNeighborhood, setSelectedRoute,
     searchQuery, setSearchQuery,
+    selectedSource, setSelectedSource,
   } = useMapStore();
 
   // Dynamically import leaflet and plugins
@@ -343,8 +345,12 @@ export default function InteractiveMap() {
       filtered = filtered.filter((c) => c.currentRoute === selectedRoute);
     }
 
+    if (selectedSource) {
+      filtered = filtered.filter((c) => c.source === selectedSource);
+    }
+
     return filtered;
-  }, [customers, searchQuery, selectedDistrict, selectedNeighborhood, selectedRoute, districts, neighborhoods]);
+  }, [customers, searchQuery, selectedDistrict, selectedNeighborhood, selectedRoute, selectedSource, districts, neighborhoods]);
 
   // Render customer points
   useEffect(() => {
@@ -496,7 +502,7 @@ export default function InteractiveMap() {
 
   // Save customer from dialog
   const handleSaveCustomer = useCallback((data: {
-    customerName: string; sellerName: string; currentRoute: string; address: string;
+    customerName: string; sellerName: string; currentRoute: string; address: string; source: string;
   }) => {
     if (editDialog.customer) {
       updateCustomer(editDialog.customer.id, data);
@@ -506,7 +512,6 @@ export default function InteractiveMap() {
         ...data,
         blockName: '',
         routeChange: '',
-        source: 'ورانگر',
         lat: editDialog.lat,
         lng: editDialog.lng,
         isNew: true,
@@ -535,7 +540,7 @@ export default function InteractiveMap() {
           blockName: '',
           routeChange: '',
           address: parts[3] || '',
-          source: 'ورانگر',
+          source: batchSource,
           lat: center.lat + (Math.random() - 0.5) * 0.01,
           lng: center.lng + (Math.random() - 0.5) * 0.01,
           isNew: true,
@@ -549,7 +554,7 @@ export default function InteractiveMap() {
       setBatchDialog(false);
       setEditMode('editPoint');
     }
-  }, [batchText, addCustomers, setEditMode]);
+  }, [batchText, batchSource, addCustomers, setEditMode]);
 
   // Remove selected customer
   const handleRemoveCustomer = useCallback(() => {
@@ -660,18 +665,22 @@ export default function InteractiveMap() {
 
         {/* Stats */}
         <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
-          <div className="grid grid-cols-3 gap-2 text-center">
-            <div className="bg-blue-50 dark:bg-blue-950/30 rounded-lg p-2.5 min-h-[56px] flex flex-col items-center justify-center">
-              <div className="text-lg font-bold text-blue-600">{customerCount.toLocaleString('fa-IR')}</div>
-              <div className="text-[10px] text-gray-500">مشتری</div>
+          <div className="grid grid-cols-4 gap-1.5 text-center">
+            <div className="bg-blue-50 dark:bg-blue-950/30 rounded-lg p-2 min-h-[56px] flex flex-col items-center justify-center">
+              <div className="text-base font-bold text-blue-600">{customerCount.toLocaleString('fa-IR')}</div>
+              <div className="text-[9px] text-gray-500">مشتری</div>
             </div>
-            <div className="bg-emerald-50 dark:bg-emerald-950/30 rounded-lg p-2.5 min-h-[56px] flex flex-col items-center justify-center">
-              <div className="text-lg font-bold text-emerald-600">22</div>
-              <div className="text-[10px] text-gray-500">منطقه</div>
+            <div className="bg-emerald-50 dark:bg-emerald-950/30 rounded-lg p-2 min-h-[56px] flex flex-col items-center justify-center">
+              <div className="text-base font-bold text-emerald-600">22</div>
+              <div className="text-[9px] text-gray-500">منطقه</div>
             </div>
-            <div className="bg-amber-50 dark:bg-amber-950/30 rounded-lg p-2.5 min-h-[56px] flex flex-col items-center justify-center">
-              <div className="text-lg font-bold text-amber-600">{mismatchCount.toLocaleString('fa-IR')}</div>
-              <div className="text-[10px] text-gray-500">عدم تطابق</div>
+            <div className="bg-purple-50 dark:bg-purple-950/30 rounded-lg p-2 min-h-[56px] flex flex-col items-center justify-center">
+              <div className="text-base font-bold text-purple-600">{customers.filter(c => c.source === 'بلده').length.toLocaleString('fa-IR')}</div>
+              <div className="text-[9px] text-gray-500">بلده</div>
+            </div>
+            <div className="bg-amber-50 dark:bg-amber-950/30 rounded-lg p-2 min-h-[56px] flex flex-col items-center justify-center">
+              <div className="text-base font-bold text-amber-600">{mismatchCount.toLocaleString('fa-IR')}</div>
+              <div className="text-[9px] text-gray-500">عدم تطابق</div>
             </div>
           </div>
         </div>
@@ -828,8 +837,22 @@ export default function InteractiveMap() {
           </select>
         </div>
 
+        {/* Filter by Source */}
+        <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
+          <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">فیلتر بر اساس منبع</h3>
+          <select
+            value={selectedSource}
+            onChange={(e) => setSelectedSource(e.target.value || '')}
+            className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 min-h-[44px]"
+          >
+            <option value="">همه منابع</option>
+            <option value="ورانگر">ورانگر</option>
+            <option value="بلده">بلده</option>
+          </select>
+        </div>
+
         {/* Active Filters */}
-        {(selectedDistrict || selectedNeighborhood || selectedRoute || searchQuery) && (
+        {(selectedDistrict || selectedNeighborhood || selectedRoute || selectedSource || searchQuery) && (
           <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
             <div className="flex items-center justify-between min-h-[44px]">
               <span className="text-xs text-gray-500">فیلتر فعال: {filteredCustomers.length.toLocaleString('fa-IR')} مشتری</span>
@@ -963,8 +986,16 @@ export default function InteractiveMap() {
                   placeholder="آدرس مشتری"
                 />
               </div>
-              <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-2.5 text-xs text-gray-500">
-                منبع: <span className="font-medium text-gray-700 dark:text-gray-300">ورانگر</span>
+              <div>
+                <label htmlFor="dialog-source" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">منبع</label>
+                <select
+                  id="dialog-source"
+                  defaultValue={editDialog.customer?.source || 'ورانگر'}
+                  className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 min-h-[44px]"
+                >
+                  <option value="ورانگر">ورانگر</option>
+                  <option value="بلده">بلده</option>
+                </select>
               </div>
             </div>
 
@@ -975,8 +1006,9 @@ export default function InteractiveMap() {
                   const seller = (document.getElementById('dialog-seller-name') as HTMLInputElement).value;
                   const route = (document.getElementById('dialog-route') as HTMLSelectElement).value;
                   const address = (document.getElementById('dialog-address') as HTMLTextAreaElement).value;
+                  const source = (document.getElementById('dialog-source') as HTMLSelectElement).value;
                   if (!name.trim()) return;
-                  handleSaveCustomer({ customerName: name, sellerName: seller, currentRoute: route, address });
+                  handleSaveCustomer({ customerName: name, sellerName: seller, currentRoute: route, address, source });
                 }}
                 className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white text-sm rounded-lg transition-colors min-h-[44px] font-medium"
               >
@@ -1021,11 +1053,23 @@ export default function InteractiveMap() {
               className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 resize-none font-mono min-h-[120px]"
               placeholder={`سوپر مارکت نمونه, علی محمدی, غرب - 110002024-مطهری, آدرس نمونه\nفروشگاه نمونه 2, رضا احمدی, شرق - 17 شهريور, آدرس نمونه 2`}
             />
-            <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-2.5 text-xs text-gray-500 mt-2">
-              منبع همه مشتریان: <span className="font-medium text-gray-700 dark:text-gray-300">ورانگر</span>
-              <br />
-              مشتریان در مرکز نقشه قرار می‌گیرند و می‌توانید آنها را جابجا کنید.
+            <div className="flex items-center gap-3 mt-2">
+              <div className="flex-1">
+                <label htmlFor="batch-source" className="block text-xs text-gray-500 mb-1">منبع مشتریان</label>
+                <select
+                  id="batch-source"
+                  value={batchSource}
+                  onChange={(e) => setBatchSource(e.target.value)}
+                  className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 min-h-[44px]"
+                >
+                  <option value="ورانگر">ورانگر</option>
+                  <option value="بلده">بلده</option>
+                </select>
+              </div>
             </div>
+            <p className="text-xs text-gray-400 mt-2">
+              مشتریان در مرکز نقشه قرار می‌گیرند و می‌توانید آنها را جابجا کنید.
+            </p>
             <div className="flex gap-2 mt-4">
               <button
                 onClick={handleBatchAdd}
