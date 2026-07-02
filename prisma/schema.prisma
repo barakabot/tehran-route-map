@@ -1,9 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -13,20 +7,57 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
+model Customer {
+  id           String  @id @default(cuid())
+  customerName String
+  sellerName   String  @default("")
+  currentRoute String  @default("")
+  blockName    String  @default("")
+  routeChange  String  @default("")
+  address      String  @default("")
+  source       String  @default("ورانگر")
+  lat          Float
+  lng          Float
+  isNew        Boolean @default(false)
+  routeName    String  @default("")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([currentRoute])
+  @@index([lat, lng])
+  @@index([customerName])
+}
+
+model Route {
   id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
+  name      String   @unique
+  color     String   @default("")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
 
-model Post {
-  id        String   @id @default(cuid())
-  title     String
-  content   String?
-  published Boolean  @default(false)
-  authorId  String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+model District {
+  id             String  @id @default(cuid())
+  name           String
+  districtNumber Int
+  geometry       String  // JSON string of GeoJSON Polygon
+  areaKm2        Float?
+  population     Int?
+  location       String?
+  description    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model Neighborhood {
+  id             String  @id @default(cuid())
+  name           String
+  districtName   String
+  districtNumber Int
+  geometry       String  // JSON string of GeoJSON Polygon
+  areaKm2        Float?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([districtName])
 }
