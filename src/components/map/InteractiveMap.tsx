@@ -13,19 +13,6 @@ const DISTRICT_COLORS = [
   '#e6194b', '#3cb44b',
 ];
 
-// Minimal point-in-polygon (ray casting)
-function pointInPolygon(x: number, y: number, coords: number[][]): boolean {
-  let inside = false;
-  for (let i = 0, j = coords.length - 1; i < coords.length; j = i++) {
-    const xi = coords[i][0], yi = coords[i][1];
-    const xj = coords[j][0], yj = coords[j][1];
-    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
-      inside = !inside;
-    }
-  }
-  return inside;
-}
-
 // Route block type
 interface RouteBlock {
   name: string;
@@ -35,6 +22,13 @@ interface RouteBlock {
   outlierCount: number;
   salesOffice: string;
   distributionCenter: string;
+}
+
+// Stats from server
+interface SourceStats {
+  total: number;
+  sourceCounts: Record<string, number>;
+  filteredSourceCounts?: Record<string, number>;
 }
 
 export default function InteractiveMap() {
@@ -49,7 +43,9 @@ export default function InteractiveMap() {
 
   const [isExporting, setIsExporting] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [customerCount, setCustomerCount] = useState(0);
+  const [loadingCustomers, setLoadingCustomers] = useState(false);
+  const [customers, setCustomers] = useState<CustomerPoint[]>([]);
+  const [stats, setStats] = useState<SourceStats>({ total: 0, sourceCounts: {} });
   const [editDialog, setEditDialog] = useState<{ open: boolean; customer: CustomerPoint | null; lat: number; lng: number }>({ open: false, customer: null, lat: 0, lng: 0 });
   const [batchDialog, setBatchDialog] = useState(false);
   const [batchText, setBatchText] = useState('');
@@ -66,7 +62,7 @@ export default function InteractiveMap() {
 
   const {
     layers, toggleLayer,
-    customers, setCustomers, addCustomer, addCustomers, updateCustomer, removeCustomer,
+    addCustomer, addCustomers, updateCustomer, removeCustomer,
     selectedCustomer, setSelectedCustomer,
     editMode, setEditMode,
     highlightMismatch, toggleHighlightMismatch,
@@ -142,31 +138,30 @@ export default function InteractiveMap() {
     initLeaflet();
   }, []);
 
-  // Load data
+  // Load metadata (no customers) + stats
   useEffect(() => {
     async function loadData() {
       try {
-        const [routesRes, distRes, neighRes, routeNamesRes, routeBlocksRes] = await Promise.all([
-          fetch('/api/geojson/routes'),
+        const [distRes, neighRes, routeNamesRes, routeBlocksRes, statsRes] = await Promise.all([
           fetch('/api/geojson/districts'),
           fetch('/api/geojson/neighborhoods'),
           fetch('/api/routes'),
           fetch('/api/route-blocks'),
+          fetch('/api/customers/by-filter'),
         ]);
-        const routesData = await routesRes.json();
         const distData = await distRes.json();
         const neighData = await neighRes.json();
         const routeNamesData = await routeNamesRes.json();
         const routeBlocksData = await routeBlocksRes.json();
+        const statsData = await statsRes.json();
 
-        setCustomers(routesData.customers);
-        setCustomerCount(routesData.customers.length);
         setDistricts(distData.districts);
         setDistrictNames(distData.names);
         setNeighborhoods(neighData.neighborhoods);
         setNeighborhoodNames(neighData.names);
         setRouteNames(routeNamesData.routes);
         setRouteBlocks(routeBlocksData.routeBlocks || []);
+        setStats(statsData);
         setLoading(false);
       } catch (err) {
         console.error('Failed to load data:', err);
@@ -174,7 +169,38 @@ export default function InteractiveMap() {
       }
     }
     loadData();
-  }, [setCustomers]);
+  }, []);
+
+  // Fetch filtered customers from server when filter changes
+  const fetchFilteredCustomers = useCallback(async () => {
+    setLoadingCustomers(true);
+    try {
+      const params = new URLSearchParams();
+      if (selectedRoute) params.set('route', selectedRoute);
+      if (selectedDistrict) params.set('district', selectedDistrict);
+      if (selectedNeighborhood) params.set('neighborhood', selectedNeighborhood);
+      if (searchQuery) params.set('search', searchQuery);
+
+      const res = await fetch(`/api/customers/by-filter?${params.toString()}`);
+      const data = await res.json();
+
+      setCustomers(data.customers || []);
+      setStats({
+        total: data.total,
+        sourceCounts: data.sourceCounts || {},
+        filteredSourceCounts: data.filteredSourceCounts,
+      });
+    } catch (err) {
+      console.error('Failed to fetch customers:', err);
+      setCustomers([]);
+    }
+    setLoadingCustomers(false);
+  }, [selectedRoute, selectedDistrict, selectedNeighborhood, searchQuery]);
+
+  // Trigger customer fetch when filter changes
+  useEffect(() => {
+    fetchFilteredCustomers();
+  }, [fetchFilteredCustomers]);
 
   // Render districts
   useEffect(() => {
@@ -299,58 +325,10 @@ export default function InteractiveMap() {
     });
   }, [routeBlocks, layers.routes, editMode, setSelectedRoute]);
 
-  // Get filtered customers
-  const getFilteredCustomers = useCallback(() => {
-    let filtered = [...customers];
-
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      filtered = filtered.filter(
-        (c) =>
-          c.customerName.toLowerCase().includes(q) ||
-          c.address.toLowerCase().includes(q) ||
-          c.sellerName.toLowerCase().includes(q)
-      );
-    }
-
-    if (selectedDistrict) {
-      const dist = districts.find((d) => d.name === selectedDistrict);
-      if (dist) {
-        filtered = filtered.filter((c) => {
-          try {
-            const poly = dist.geometry as { coordinates: number[][][] };
-            return pointInPolygon(c.lng, c.lat, poly.coordinates[0]);
-          } catch {
-            return true;
-          }
-        });
-      }
-    }
-
-    if (selectedNeighborhood) {
-      const neigh = neighborhoods.find((n) => n.name === selectedNeighborhood);
-      if (neigh) {
-        filtered = filtered.filter((c) => {
-          try {
-            const poly = neigh.geometry as { coordinates: number[][][] };
-            return pointInPolygon(c.lng, c.lat, poly.coordinates[0]);
-          } catch {
-            return true;
-          }
-        });
-      }
-    }
-
-    if (selectedRoute) {
-      filtered = filtered.filter((c) => c.currentRoute === selectedRoute);
-    }
-
-    if (selectedSource) {
-      filtered = filtered.filter((c) => c.source === selectedSource);
-    }
-
-    return filtered;
-  }, [customers, searchQuery, selectedDistrict, selectedNeighborhood, selectedRoute, selectedSource, districts, neighborhoods]);
+  // Client-side source filter (applied on already-fetched customers)
+  const displayCustomers = selectedSource
+    ? customers.filter((c) => c.source === selectedSource)
+    : customers;
 
   // Render customer points
   useEffect(() => {
@@ -361,9 +339,7 @@ export default function InteractiveMap() {
     cl.clearLayers();
     if (!layers.customers) return;
 
-    const filtered = getFilteredCustomers();
-
-    filtered.forEach((customer) => {
+    displayCustomers.forEach((customer) => {
       const isMismatch = highlightMismatch && customer.routeChange && customer.routeChange !== 'بدون تغییر';
       const color = isMismatch ? '#ef4444' : (customer.isNew ? '#22c55e' : '#3b82f6');
       const radius = isMismatch ? 6 : 4;
@@ -429,7 +405,7 @@ export default function InteractiveMap() {
 
       cl.addLayer(marker);
     });
-  }, [customers, layers.customers, editMode, highlightMismatch, getFilteredCustomers, setSelectedCustomer, updateCustomer]);
+  }, [displayCustomers, layers.customers, editMode, highlightMismatch, setSelectedCustomer, updateCustomer]);
 
   // User location
   useEffect(() => {
@@ -471,8 +447,7 @@ export default function InteractiveMap() {
     setIsExporting(true);
     try {
       const XLSX = await import('xlsx');
-      const filtered = getFilteredCustomers();
-      const data = filtered.map((c) => ({
+      const data = displayCustomers.map((c) => ({
         'کد و نام مشتری': c.customerName,
         'نام فروشنده': c.sellerName,
         'مسیر فعلی': c.currentRoute,
@@ -498,16 +473,19 @@ export default function InteractiveMap() {
       console.error('Export failed:', err);
     }
     setIsExporting(false);
-  }, [getFilteredCustomers]);
+  }, [displayCustomers]);
 
   // Save customer from dialog
   const handleSaveCustomer = useCallback((data: {
     customerName: string; sellerName: string; currentRoute: string; address: string; source: string;
   }) => {
     if (editDialog.customer) {
-      updateCustomer(editDialog.customer.id, data);
+      // Update in local state
+      setCustomers((prev) => prev.map((c) =>
+        c.id === editDialog.customer!.id ? { ...c, ...data } : c
+      ));
     } else {
-      addCustomer({
+      const newCustomer: CustomerPoint = {
         id: `new-${Date.now()}-${Math.random().toString(36).slice(2)}`,
         ...data,
         blockName: '',
@@ -515,10 +493,12 @@ export default function InteractiveMap() {
         lat: editDialog.lat,
         lng: editDialog.lng,
         isNew: true,
-      });
+      };
+      addCustomer(newCustomer);
+      setCustomers((prev) => [...prev, newCustomer]);
     }
     setEditDialog({ open: false, customer: null, lat: 0, lng: 0 });
-  }, [editDialog, addCustomer, updateCustomer]);
+  }, [editDialog, addCustomer]);
 
   // Handle batch add
   const handleBatchAdd = useCallback(() => {
@@ -532,7 +512,7 @@ export default function InteractiveMap() {
         const L = leafletRef.current;
         const map = mapRef.current as ReturnType<typeof L.map> | null;
         const center = map?.getCenter() || { lat: 35.6892, lng: 51.389 };
-        newCustomers.push({
+        const nc: CustomerPoint = {
           id: `batch-${Date.now()}-${Math.random().toString(36).slice(2)}`,
           customerName: parts[0] || '',
           sellerName: parts[1] || '',
@@ -544,12 +524,14 @@ export default function InteractiveMap() {
           lat: center.lat + (Math.random() - 0.5) * 0.01,
           lng: center.lng + (Math.random() - 0.5) * 0.01,
           isNew: true,
-        });
+        };
+        newCustomers.push(nc);
       }
     }
 
     if (newCustomers.length > 0) {
       addCustomers(newCustomers);
+      setCustomers((prev) => [...prev, ...newCustomers]);
       setBatchText('');
       setBatchDialog(false);
       setEditMode('editPoint');
@@ -560,6 +542,7 @@ export default function InteractiveMap() {
   const handleRemoveCustomer = useCallback(() => {
     if (editDialog.customer) {
       removeCustomer(editDialog.customer.id);
+      setCustomers((prev) => prev.filter((c) => c.id !== editDialog.customer!.id));
       setEditDialog({ open: false, customer: null, lat: 0, lng: 0 });
     }
   }, [editDialog.customer, removeCustomer]);
@@ -591,11 +574,14 @@ export default function InteractiveMap() {
     }
   }, [districts]);
 
-  const mismatchCount = customers.filter(
-    (c) => c.routeChange && c.routeChange !== 'بدون تغییر'
-  ).length;
+  // Determine current source counts to show
+  const isFiltered = selectedDistrict || selectedNeighborhood || selectedRoute || searchQuery;
+  const currentSourceCounts = isFiltered && stats.filteredSourceCounts ? stats.filteredSourceCounts : stats.sourceCounts;
+  const currentCount = displayCustomers.length;
+  const hasFilter = selectedDistrict || selectedNeighborhood || selectedRoute || selectedSource || searchQuery;
 
-  const filteredCustomers = getFilteredCustomers();
+  // Source list for dropdown (from stats)
+  const sourceList = Object.keys(stats.sourceCounts);
 
   return (
     <div className="relative w-full h-screen h-[100dvh] flex" dir="rtl">
@@ -612,7 +598,7 @@ export default function InteractiveMap() {
         )}
       </button>
 
-      {/* Mobile Backdrop - semi-transparent overlay when sidebar is open */}
+      {/* Mobile Backdrop */}
       {showSidebar && (
         <div
           className="fixed inset-0 z-[998] bg-black/40 lg:hidden transition-opacity duration-300"
@@ -621,7 +607,7 @@ export default function InteractiveMap() {
         />
       )}
 
-      {/* Sidebar - Bottom sheet on mobile (< lg), side panel on desktop (>= lg) */}
+      {/* Sidebar */}
       <div
         className={`
           fixed inset-x-0 bottom-0 z-[999] w-full max-h-[60vh]
@@ -645,7 +631,7 @@ export default function InteractiveMap() {
           <div className="w-10 h-1 bg-gray-300 dark:bg-gray-600 rounded-full" />
         </div>
 
-        {/* Close button (mobile only) - positioned in top-left (end side in RTL) */}
+        {/* Close button (mobile only) */}
         <button
           onClick={() => setShowSidebar(false)}
           className="absolute top-2 left-2 z-10 lg:hidden bg-gray-100 dark:bg-gray-800 rounded-full min-h-[44px] min-w-[44px] flex items-center justify-center text-gray-500 hover:bg-gray-200 dark:hover:bg-gray-700 active:bg-gray-300 dark:active:bg-gray-600 transition-colors"
@@ -663,27 +649,43 @@ export default function InteractiveMap() {
           <p className="text-xs text-gray-500 mt-1">مدیریت مشتریان و مسیرها</p>
         </div>
 
-        {/* Stats */}
+        {/* Stats - with source breakdown */}
         <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
-          <div className="grid grid-cols-4 gap-1.5 text-center">
+          <div className="grid grid-cols-2 gap-1.5 mb-2">
             <div className="bg-blue-50 dark:bg-blue-950/30 rounded-lg p-2 min-h-[56px] flex flex-col items-center justify-center">
-              <div className="text-base font-bold text-blue-600">{customerCount.toLocaleString('fa-IR')}</div>
-              <div className="text-[9px] text-gray-500">مشتری</div>
+              <div className="text-base font-bold text-blue-600">
+                {isFiltered ? currentCount.toLocaleString('fa-IR') : stats.total.toLocaleString('fa-IR')}
+              </div>
+              <div className="text-[9px] text-gray-500">
+                {isFiltered ? 'مشتری فیلترشده' : 'کل مشتریان'}
+              </div>
             </div>
             <div className="bg-emerald-50 dark:bg-emerald-950/30 rounded-lg p-2 min-h-[56px] flex flex-col items-center justify-center">
               <div className="text-base font-bold text-emerald-600">22</div>
               <div className="text-[9px] text-gray-500">منطقه</div>
             </div>
-            <div className="bg-purple-50 dark:bg-purple-950/30 rounded-lg p-2 min-h-[56px] flex flex-col items-center justify-center">
-              <div className="text-base font-bold text-purple-600">{customers.filter(c => c.source === 'بلده').length.toLocaleString('fa-IR')}</div>
-              <div className="text-[9px] text-gray-500">بلده</div>
-            </div>
-            <div className="bg-amber-50 dark:bg-amber-950/30 rounded-lg p-2 min-h-[56px] flex flex-col items-center justify-center">
-              <div className="text-base font-bold text-amber-600">{mismatchCount.toLocaleString('fa-IR')}</div>
-              <div className="text-[9px] text-gray-500">عدم تطابق</div>
-            </div>
+          </div>
+          {/* Source breakdown */}
+          <div className="flex gap-1.5">
+            {sourceList.map((src) => (
+              <div key={src} className="flex-1 bg-purple-50 dark:bg-purple-950/30 rounded-lg p-1.5 flex flex-col items-center justify-center min-h-[44px]">
+                <div className="text-sm font-bold text-purple-600">
+                  {(currentSourceCounts[src] || 0).toLocaleString('fa-IR')}
+                </div>
+                <div className="text-[9px] text-gray-500">{src}</div>
+              </div>
+            ))}
           </div>
         </div>
+
+        {/* Info banner when no filter */}
+        {!hasFilter && !loading && (
+          <div className="px-3 py-2 bg-amber-50 dark:bg-amber-950/20 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
+            <p className="text-[11px] text-amber-700 dark:text-amber-400 text-center">
+              برای مشاهده مشتریان، یک مسیر، منطقه یا محله را انتخاب کنید
+            </p>
+          </div>
+        )}
 
         {/* Search */}
         <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
@@ -846,16 +848,26 @@ export default function InteractiveMap() {
             className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 min-h-[44px]"
           >
             <option value="">همه منابع</option>
-            <option value="ورانگر">ورانگر</option>
-            <option value="بلده">بلده</option>
+            {sourceList.map((s) => (
+              <option key={s} value={s}>{s} ({(currentSourceCounts[s] || 0).toLocaleString('fa-IR')})</option>
+            ))}
           </select>
         </div>
 
         {/* Active Filters */}
-        {(selectedDistrict || selectedNeighborhood || selectedRoute || selectedSource || searchQuery) && (
+        {hasFilter && (
           <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
             <div className="flex items-center justify-between min-h-[44px]">
-              <span className="text-xs text-gray-500">فیلتر فعال: {filteredCustomers.length.toLocaleString('fa-IR')} مشتری</span>
+              <span className="text-xs text-gray-500">
+                {loadingCustomers ? (
+                  <span className="flex items-center gap-1">
+                    <span className="animate-spin inline-block">⟳</span>
+                    در حال بارگذاری...
+                  </span>
+                ) : (
+                  <span>نمایش: {currentCount.toLocaleString('fa-IR')} مشتری</span>
+                )}
+              </span>
               <button onClick={clearFilter} className="text-xs text-red-500 hover:text-red-700 active:text-red-800 min-h-[44px] px-3 flex items-center transition-colors">پاک‌سازی</button>
             </div>
           </div>
@@ -865,13 +877,13 @@ export default function InteractiveMap() {
         <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
           <button
             onClick={handleExport}
-            disabled={isExporting}
+            disabled={isExporting || displayCustomers.length === 0}
             className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white text-sm rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-2 min-h-[44px]"
           >
             {isExporting ? (
               <><span className="animate-spin inline-block">⟳</span> در حال خروجی...</>
             ) : (
-              <>📥 خروجی اکسل ({filteredCustomers.length.toLocaleString('fa-IR')} مشتری)</>
+              <>📥 خروجی اکسل ({currentCount.toLocaleString('fa-IR')} مشتری)</>
             )}
           </button>
         </div>
@@ -913,7 +925,15 @@ export default function InteractiveMap() {
         )}
         <div ref={mapContainerRef} className="w-full h-full" />
 
-        {/* Edit mode banner - smaller on mobile */}
+        {/* Loading customers overlay */}
+        {loadingCustomers && !loading && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[1000] bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 px-4 py-2 rounded-full text-xs font-medium shadow-lg flex items-center gap-2">
+            <span className="animate-spin inline-block">⟳</span>
+            در حال بارگذاری مشتریان...
+          </div>
+        )}
+
+        {/* Edit mode banner */}
         {editMode !== 'none' && (
           <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[1000] bg-amber-500 text-white px-3 py-2 lg:px-4 lg:py-2 rounded-full text-xs lg:text-sm font-medium shadow-lg whitespace-nowrap max-w-[85vw] truncate">
             {editMode === 'addCustomer' && 'حالت افزودن مشتری - روی نقشه کلیک کنید'}
@@ -923,7 +943,7 @@ export default function InteractiveMap() {
         )}
       </div>
 
-      {/* Add/Edit Customer Dialog - bottom sheet on mobile, centered modal on desktop */}
+      {/* Add/Edit Customer Dialog */}
       {editDialog.open && (
         <div className="fixed inset-0 z-[1001] flex items-end lg:items-center justify-center bg-black/50 p-0 lg:p-4 safe-area-bottom" onClick={() => setEditDialog({ open: false, customer: null, lat: 0, lng: 0 })}>
           <div className="bg-white dark:bg-gray-900 rounded-t-2xl lg:rounded-xl shadow-2xl w-full lg:max-w-md max-h-[90vh] overflow-y-auto p-5 pb-8 lg:p-6 lg:pb-6" dir="rtl" onClick={(e) => e.stopPropagation()}>
@@ -993,8 +1013,14 @@ export default function InteractiveMap() {
                   defaultValue={editDialog.customer?.source || 'ورانگر'}
                   className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 min-h-[44px]"
                 >
-                  <option value="ورانگر">ورانگر</option>
-                  <option value="بلده">بلده</option>
+                  {sourceList.length > 0 ? sourceList.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  )) : (
+                    <>
+                      <option value="ورانگر">ورانگر</option>
+                      <option value="بلده">بلده</option>
+                    </>
+                  )}
                 </select>
               </div>
             </div>
@@ -1033,7 +1059,7 @@ export default function InteractiveMap() {
         </div>
       )}
 
-      {/* Batch Add Dialog - bottom sheet on mobile, centered modal on desktop */}
+      {/* Batch Add Dialog */}
       {batchDialog && (
         <div className="fixed inset-0 z-[1001] flex items-end lg:items-center justify-center bg-black/50 p-0 lg:p-4 safe-area-bottom" onClick={() => setBatchDialog(false)}>
           <div className="bg-white dark:bg-gray-900 rounded-t-2xl lg:rounded-xl shadow-2xl w-full lg:max-w-lg max-h-[90vh] overflow-y-auto p-5 pb-8 lg:p-6 lg:pb-6" dir="rtl" onClick={(e) => e.stopPropagation()}>
@@ -1062,8 +1088,14 @@ export default function InteractiveMap() {
                   onChange={(e) => setBatchSource(e.target.value)}
                   className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 min-h-[44px]"
                 >
-                  <option value="ورانگر">ورانگر</option>
-                  <option value="بلده">بلده</option>
+                  {sourceList.length > 0 ? sourceList.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  )) : (
+                    <>
+                      <option value="ورانگر">ورانگر</option>
+                      <option value="بلده">بلده</option>
+                    </>
+                  )}
                 </select>
               </div>
             </div>

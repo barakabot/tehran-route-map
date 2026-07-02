@@ -1,0 +1,1092 @@
+     1→'use client';
+     2→
+     3→import { useEffect, useRef, useCallback, useState } from 'react';
+     4→import { useMapStore } from '@/lib/store';
+     5→import type { CustomerPoint } from '@/lib/types';
+     6→
+     7→// Color palette for districts
+     8→const DISTRICT_COLORS = [
+     9→  '#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231',
+    10→  '#911eb4', '#42d4f4', '#f032e6', '#bfef45', '#fabed4',
+    11→  '#469990', '#dcbeff', '#9A6324', '#fffac8', '#800000',
+    12→  '#aaffc3', '#808000', '#ffd8b1', '#000075', '#a9a9a9',
+    13→  '#e6194b', '#3cb44b',
+    14→];
+    15→
+    16→// Minimal point-in-polygon (ray casting)
+    17→function pointInPolygon(x: number, y: number, coords: number[][]): boolean {
+    18→  let inside = false;
+    19→  for (let i = 0, j = coords.length - 1; i < coords.length; j = i++) {
+    20→    const xi = coords[i][0], yi = coords[i][1];
+    21→    const xj = coords[j][0], yj = coords[j][1];
+    22→    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
+    23→      inside = !inside;
+    24→    }
+    25→  }
+    26→  return inside;
+    27→}
+    28→
+    29→// Route block type
+    30→interface RouteBlock {
+    31→  name: string;
+    32→  geometry: { type: string; coordinates: number[][][] };
+    33→  customerCount: number;
+    34→  coreCustomerCount: number;
+    35→  outlierCount: number;
+    36→  salesOffice: string;
+    37→  distributionCenter: string;
+    38→}
+    39→
+    40→export default function InteractiveMap() {
+    41→  const mapRef = useRef<unknown>(null);
+    42→  const mapContainerRef = useRef<HTMLDivElement>(null);
+    43→  const customerLayerRef = useRef<unknown>(null);
+    44→  const districtLayerRef = useRef<unknown>(null);
+    45→  const neighborhoodLayerRef = useRef<unknown>(null);
+    46→  const userMarkerRef = useRef<unknown>(null);
+    47→  const routeLayerRef = useRef<unknown>(null);
+    48→  const leafletRef = useRef<typeof import('leaflet') | null>(null);
+    49→
+    50→  const [isExporting, setIsExporting] = useState(false);
+    51→  const [loading, setLoading] = useState(true);
+    52→  const [customerCount, setCustomerCount] = useState(0);
+    53→  const [editDialog, setEditDialog] = useState<{ open: boolean; customer: CustomerPoint | null; lat: number; lng: number }>({ open: false, customer: null, lat: 0, lng: 0 });
+    54→  const [batchDialog, setBatchDialog] = useState(false);
+    55→  const [batchText, setBatchText] = useState('');
+    56→  const [batchSource, setBatchSource] = useState('ورانگر');
+    57→  const [districts, setDistricts] = useState<Array<{ name: string; district_number: number; geometry: Record<string, unknown> }>>([]);
+    58→  const [neighborhoods, setNeighborhoods] = useState<Array<{ name: string; district_name: string; geometry: Record<string, unknown> }>>([]);
+    59→  const [districtNames, setDistrictNames] = useState<Array<{ name: string; district_number: number }>>([]);
+    60→  const [neighborhoodNames, setNeighborhoodNames] = useState<Array<{ name: string; district_name: string; district_number: number }>>([]);
+    61→  const [routeNames, setRouteNames] = useState<string[]>([]);
+    62→  const [routeBlocks, setRouteBlocks] = useState<RouteBlock[]>([]);
+    63→  const [showSidebar, setShowSidebar] = useState(
+    64→    typeof window !== 'undefined' ? window.matchMedia('(min-width: 1024px)').matches : true
+    65→  );
+    66→
+    67→  const {
+    68→    layers, toggleLayer,
+    69→    customers, setCustomers, addCustomer, addCustomers, updateCustomer, removeCustomer,
+    70→    selectedCustomer, setSelectedCustomer,
+    71→    editMode, setEditMode,
+    72→    highlightMismatch, toggleHighlightMismatch,
+    73→    clearFilter,
+    74→    userLocation, setUserLocation,
+    75→    selectedDistrict, selectedNeighborhood, selectedRoute,
+    76→    setSelectedDistrict, setSelectedNeighborhood, setSelectedRoute,
+    77→    searchQuery, setSearchQuery,
+    78→    selectedSource, setSelectedSource,
+    79→  } = useMapStore();
+    80→
+    81→  // Dynamically import leaflet and plugins
+    82→  useEffect(() => {
+    83→    async function initLeaflet() {
+    84→      const L = await import('leaflet');
+    85→      await import('leaflet/dist/leaflet.css');
+    86→      await import('@geoman-io/leaflet-geoman-free');
+    87→      await import('@geoman-io/leaflet-geoman-free/dist/leaflet-geoman.css');
+    88→
+    89→      // Fix marker icon
+    90→      delete (L.Icon.Default.prototype as Record<string, unknown>)._getIconUrl;
+    91→      L.Icon.Default.mergeOptions({
+    92→        iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+    93→        iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+    94→        shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+    95→      });
+    96→
+    97→      leafletRef.current = L;
+    98→
+    99→      if (!mapContainerRef.current || mapRef.current) return;
+   100→
+   101→      const map = L.map(mapContainerRef.current, {
+   102→        center: [35.6892, 51.389],
+   103→        zoom: 11,
+   104→        zoomControl: false,
+   105→        pmIgnore: false,
+   106→      });
+   107→
+   108→      L.control.zoom({ position: 'topright' }).addTo(map);
+   109→
+   110→      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+   111→        attribution: '&copy; OpenStreetMap contributors',
+   112→        maxZoom: 19,
+   113→      }).addTo(map);
+   114→
+   115→      map.pm.addControls({
+   116→        position: 'topleft',
+   117→        drawMarker: false,
+   118→        drawPolyline: false,
+   119→        drawRectangle: false,
+   120→        drawCircle: false,
+   121→        drawCircleMarker: false,
+   122→        drawText: false,
+   123→        drawPolygon: false,
+   124→        editMode: false,
+   125→        removalMode: false,
+   126→        cutPolygon: false,
+   127→      });
+   128→
+   129→      customerLayerRef.current = L.layerGroup().addTo(map);
+   130→      districtLayerRef.current = L.layerGroup().addTo(map);
+   131→      neighborhoodLayerRef.current = L.layerGroup().addTo(map);
+   132→      routeLayerRef.current = L.layerGroup().addTo(map);
+   133→
+   134→      map.on('click', (e: { latlng: { lat: number; lng: number } }) => {
+   135→        if (editMode === 'addCustomer') {
+   136→          setEditDialog({ open: true, customer: null, lat: e.latlng.lat, lng: e.latlng.lng });
+   137→        }
+   138→      });
+   139→
+   140→      mapRef.current = map;
+   141→    }
+   142→    initLeaflet();
+   143→  }, []);
+   144→
+   145→  // Load data
+   146→  useEffect(() => {
+   147→    async function loadData() {
+   148→      try {
+   149→        const [routesRes, distRes, neighRes, routeNamesRes, routeBlocksRes] = await Promise.all([
+   150→          fetch('/api/geojson/routes'),
+   151→          fetch('/api/geojson/districts'),
+   152→          fetch('/api/geojson/neighborhoods'),
+   153→          fetch('/api/routes'),
+   154→          fetch('/api/route-blocks'),
+   155→        ]);
+   156→        const routesData = await routesRes.json();
+   157→        const distData = await distRes.json();
+   158→        const neighData = await neighRes.json();
+   159→        const routeNamesData = await routeNamesRes.json();
+   160→        const routeBlocksData = await routeBlocksRes.json();
+   161→
+   162→        setCustomers(routesData.customers);
+   163→        setCustomerCount(routesData.customers.length);
+   164→        setDistricts(distData.districts);
+   165→        setDistrictNames(distData.names);
+   166→        setNeighborhoods(neighData.neighborhoods);
+   167→        setNeighborhoodNames(neighData.names);
+   168→        setRouteNames(routeNamesData.routes);
+   169→        setRouteBlocks(routeBlocksData.routeBlocks || []);
+   170→        setLoading(false);
+   171→      } catch (err) {
+   172→        console.error('Failed to load data:', err);
+   173→        setLoading(false);
+   174→      }
+   175→    }
+   176→    loadData();
+   177→  }, [setCustomers]);
+   178→
+   179→  // Render districts
+   180→  useEffect(() => {
+   181→    const L = leafletRef.current;
+   182→    if (!L || !districtLayerRef.current) return;
+   183→    const dl = districtLayerRef.current as ReturnType<typeof L.layerGroup>;
+   184→    dl.clearLayers();
+   185→    if (!layers.districts) return;
+   186→
+   187→    districts.forEach((d, i) => {
+   188→      const geojson = L.geoJSON(d.geometry as GeoJSON.GeometryObject, {
+   189→        style: {
+   190→          color: DISTRICT_COLORS[i % DISTRICT_COLORS.length],
+   191→          weight: 2,
+   192→          fillColor: DISTRICT_COLORS[i % DISTRICT_COLORS.length],
+   193→          fillOpacity: 0.08,
+   194→          opacity: 0.7,
+   195→        },
+   196→        onEachFeature: (_feature: unknown, layer: unknown) => {
+   197→          const l = layer as L.Polygon;
+   198→          l.bindTooltip(d.name, { sticky: true, direction: 'top' });
+   199→          l.on('click', () => {
+   200→            setSelectedDistrict(d.name);
+   201→          });
+   202→          if (editMode === 'editPolygon') {
+   203→            l.pm?.enable({ allowSelfIntersection: false });
+   204→          }
+   205→        },
+   206→      });
+   207→      dl.addLayer(geojson);
+   208→    });
+   209→  }, [districts, layers.districts, editMode, setSelectedDistrict]);
+   210→
+   211→  // Render neighborhoods
+   212→  useEffect(() => {
+   213→    const L = leafletRef.current;
+   214→    if (!L || !neighborhoodLayerRef.current) return;
+   215→    const nl = neighborhoodLayerRef.current as ReturnType<typeof L.layerGroup>;
+   216→    nl.clearLayers();
+   217→    if (!layers.neighborhoods) return;
+   218→
+   219→    neighborhoods.forEach((n) => {
+   220→      const geojson = L.geoJSON(n.geometry as GeoJSON.GeometryObject, {
+   221→        style: {
+   222→          color: '#6366f1',
+   223→          weight: 1.5,
+   224→          fillColor: '#818cf8',
+   225→          fillOpacity: 0.1,
+   226→          opacity: 0.5,
+   227→          dashArray: '4, 4',
+   228→        },
+   229→      });
+   230→
+   231→      geojson.eachLayer((layer: unknown) => {
+   232→        const l = layer as L.Polygon;
+   233→        l.bindTooltip(n.name, { sticky: true, direction: 'top' });
+   234→        l.on('click', () => {
+   235→          setSelectedNeighborhood(n.name);
+   236→        });
+   237→        if (editMode === 'editPolygon') {
+   238→          l.pm?.enable({ allowSelfIntersection: false });
+   239→        }
+   240→      });
+   241→
+   242→      nl.addLayer(geojson);
+   243→    });
+   244→  }, [neighborhoods, layers.neighborhoods, editMode, setSelectedNeighborhood]);
+   245→
+   246→  // Render route block polygons (from database - real polygons)
+   247→  useEffect(() => {
+   248→    const L = leafletRef.current;
+   249→    if (!L || !routeLayerRef.current) return;
+   250→    const rl = routeLayerRef.current as ReturnType<typeof L.layerGroup>;
+   251→    rl.clearLayers();
+   252→    if (!layers.routes || routeBlocks.length === 0) return;
+   253→
+   254→    // Generate distinct colors using golden angle HSL
+   255→    const routeColorMap = new Map<string, string>();
+   256→    routeBlocks.forEach((rb, i) => {
+   257→      const hue = (i * 137.508) % 360;
+   258→      routeColorMap.set(rb.name, `hsl(${hue}, 65%, 50%)`);
+   259→    });
+   260→
+   261→    routeBlocks.forEach((rb) => {
+   262→      if (!rb.geometry?.coordinates?.[0]) return;
+   263→
+   264→      const color = routeColorMap.get(rb.name) || '#888';
+   265→
+   266→      // Convert GeoJSON [lng, lat] to Leaflet [lat, lng]
+   267→      const latLngs = rb.geometry.coordinates[0].map(
+   268→        (c) => [c[1], c[0]] as [number, number]
+   269→      );
+   270→
+   271→      const polygon = L.polygon(latLngs, {
+   272→        color: color,
+   273→        weight: 2,
+   274→        fillColor: color,
+   275→        fillOpacity: 0.12,
+   276→        opacity: 0.8,
+   277→        dashArray: '6, 3',
+   278→      });
+   279→
+   280→      polygon.bindTooltip(
+   281→        `<div style="direction:rtl;text-align:right;font-size:12px;">
+   282→          <strong>${rb.name}</strong><br/>
+   283→          <span style="color:#666;">تعداد مشتری: ${rb.customerCount}</span><br/>
+   284→          <span style="color:#888;">هسته: ${rb.coreCustomerCount} | خارج: ${rb.outlierCount}</span>
+   285→          ${rb.salesOffice ? `<br/><span style="color:#999;">دفتر: ${rb.salesOffice}</span>` : ''}
+   286→        </div>`,
+   287→        { sticky: true, direction: 'top', className: 'custom-tooltip' }
+   288→      );
+   289→
+   290→      polygon.on('click', () => {
+   291→        setSelectedRoute(rb.name);
+   292→      });
+   293→
+   294→      if (editMode === 'editPolygon') {
+   295→        polygon.pm?.enable({ allowSelfIntersection: false });
+   296→      }
+   297→
+   298→      rl.addLayer(polygon);
+   299→    });
+   300→  }, [routeBlocks, layers.routes, editMode, setSelectedRoute]);
+   301→
+   302→  // Get filtered customers
+   303→  const getFilteredCustomers = useCallback(() => {
+   304→    let filtered = [...customers];
+   305→
+   306→    if (searchQuery) {
+   307→      const q = searchQuery.toLowerCase();
+   308→      filtered = filtered.filter(
+   309→        (c) =>
+   310→          c.customerName.toLowerCase().includes(q) ||
+   311→          c.address.toLowerCase().includes(q) ||
+   312→          c.sellerName.toLowerCase().includes(q)
+   313→      );
+   314→    }
+   315→
+   316→    if (selectedDistrict) {
+   317→      const dist = districts.find((d) => d.name === selectedDistrict);
+   318→      if (dist) {
+   319→        filtered = filtered.filter((c) => {
+   320→          try {
+   321→            const poly = dist.geometry as { coordinates: number[][][] };
+   322→            return pointInPolygon(c.lng, c.lat, poly.coordinates[0]);
+   323→          } catch {
+   324→            return true;
+   325→          }
+   326→        });
+   327→      }
+   328→    }
+   329→
+   330→    if (selectedNeighborhood) {
+   331→      const neigh = neighborhoods.find((n) => n.name === selectedNeighborhood);
+   332→      if (neigh) {
+   333→        filtered = filtered.filter((c) => {
+   334→          try {
+   335→            const poly = neigh.geometry as { coordinates: number[][][] };
+   336→            return pointInPolygon(c.lng, c.lat, poly.coordinates[0]);
+   337→          } catch {
+   338→            return true;
+   339→          }
+   340→        });
+   341→      }
+   342→    }
+   343→
+   344→    if (selectedRoute) {
+   345→      filtered = filtered.filter((c) => c.currentRoute === selectedRoute);
+   346→    }
+   347→
+   348→    if (selectedSource) {
+   349→      filtered = filtered.filter((c) => c.source === selectedSource);
+   350→    }
+   351→
+   352→    return filtered;
+   353→  }, [customers, searchQuery, selectedDistrict, selectedNeighborhood, selectedRoute, selectedSource, districts, neighborhoods]);
+   354→
+   355→  // Render customer points
+   356→  useEffect(() => {
+   357→    const L = leafletRef.current;
+   358→    const map = mapRef.current as ReturnType<typeof L.map> | null;
+   359→    if (!L || !customerLayerRef.current) return;
+   360→    const cl = customerLayerRef.current as ReturnType<typeof L.layerGroup>;
+   361→    cl.clearLayers();
+   362→    if (!layers.customers) return;
+   363→
+   364→    const filtered = getFilteredCustomers();
+   365→
+   366→    filtered.forEach((customer) => {
+   367→      const isMismatch = highlightMismatch && customer.routeChange && customer.routeChange !== 'بدون تغییر';
+   368→      const color = isMismatch ? '#ef4444' : (customer.isNew ? '#22c55e' : '#3b82f6');
+   369→      const radius = isMismatch ? 6 : 4;
+   370→
+   371→      const marker = L.circleMarker([customer.lat, customer.lng], {
+   372→        radius,
+   373→        fillColor: color,
+   374→        color: isMismatch ? '#dc2626' : '#1d4ed8',
+   375→        weight: 1.5,
+   376→        opacity: 1,
+   377→        fillOpacity: 0.8,
+   378→      });
+   379→
+   380→      const tooltipContent = `
+   381→        <div style="direction:rtl; text-align:right; font-size:12px; min-width:200px;">
+   382→          <strong style="color:${isMismatch ? '#ef4444' : '#1e40af'}">${customer.customerName}</strong><br/>
+   383→          <span style="color:#666">فروشنده:</span> ${customer.sellerName}<br/>
+   384→          <span style="color:#666">مسیر:</span> ${customer.currentRoute}<br/>
+   385→          <span style="color:#666">بلوک:</span> ${customer.blockName}<br/>
+   386→          ${isMismatch ? '<span style="color:#ef4444; font-weight:bold">&#9888; عدم تطابق مسیر</span><br/>' : ''}
+   387→          <span style="color:#666">آدرس:</span> ${customer.address}<br/>
+   388→          <span style="color:#999">منبع: ${customer.source}</span>
+   389→        </div>
+   390→      `;
+   391→
+   392→      marker.bindTooltip(tooltipContent, {
+   393→        sticky: true,
+   394→        direction: 'top',
+   395→        className: 'custom-tooltip',
+   396→      });
+   397→
+   398→      marker.on('click', () => {
+   399→        setSelectedCustomer(customer);
+   400→        setEditDialog({ open: true, customer, lat: customer.lat, lng: customer.lng });
+   401→      });
+   402→
+   403→      // Drag to edit point position
+   404→      if (editMode === 'editPoint' && map) {
+   405→        marker.on('mouseover', () => {
+   406→          map.getContainer().style.cursor = 'grab';
+   407→        });
+   408→        marker.on('mouseout', () => {
+   409→          map.getContainer().style.cursor = '';
+   410→        });
+   411→        marker.on('mousedown', () => {
+   412→          map.getContainer().style.cursor = 'grabbing';
+   413→          const onMove = (e: { latlng: { lat: number; lng: number } }) => {
+   414→            marker.setLatLng(e.latlng);
+   415→          };
+   416→          const onUp = (e: { latlng: { lat: number; lng: number } }) => {
+   417→            map.getContainer().style.cursor = '';
+   418→            map.off('mousemove', onMove);
+   419→            map.off('mouseup', onUp);
+   420→            updateCustomer(customer.id, {
+   421→              lat: e.latlng.lat,
+   422→              lng: e.latlng.lng,
+   423→            });
+   424→          };
+   425→          map.on('mousemove', onMove);
+   426→          map.on('mouseup', onUp);
+   427→        });
+   428→      }
+   429→
+   430→      cl.addLayer(marker);
+   431→    });
+   432→  }, [customers, layers.customers, editMode, highlightMismatch, getFilteredCustomers, setSelectedCustomer, updateCustomer]);
+   433→
+   434→  // User location
+   435→  useEffect(() => {
+   436→    const L = leafletRef.current;
+   437→    const map = mapRef.current as ReturnType<typeof L.map> | null;
+   438→    if (!L || !map) return;
+   439→    if (navigator.geolocation) {
+   440→      navigator.geolocation.getCurrentPosition(
+   441→        (pos) => {
+   442→          const lat = pos.coords.latitude;
+   443→          const lng = pos.coords.longitude;
+   444→          setUserLocation([lat, lng]);
+   445→
+   446→          if (userMarkerRef.current) {
+   447→            map.removeLayer(userMarkerRef.current as L.Marker);
+   448→          }
+   449→
+   450→          const pulseIcon = L.divIcon({
+   451→            html: '<div style="width:20px;height:20px;background:#3b82f6;border:3px solid white;border-radius:50%;box-shadow:0 0 10px rgba(59,130,246,0.5);animation:pulse 2s infinite;"></div>',
+   452→            className: '',
+   453→            iconSize: [20, 20],
+   454→            iconAnchor: [10, 10],
+   455→          });
+   456→
+   457→          userMarkerRef.current = L.marker([lat, lng], { icon: pulseIcon })
+   458→            .addTo(map)
+   459→            .bindTooltip('موقعیت شما', { direction: 'top', permanent: false });
+   460→        },
+   461→        () => {
+   462→          console.warn('Geolocation permission denied');
+   463→        },
+   464→        { enableHighAccuracy: true }
+   465→      );
+   466→    }
+   467→  }, [setUserLocation]);
+   468→
+   469→  // Export to Excel
+   470→  const handleExport = useCallback(async () => {
+   471→    setIsExporting(true);
+   472→    try {
+   473→      const XLSX = await import('xlsx');
+   474→      const filtered = getFilteredCustomers();
+   475→      const data = filtered.map((c) => ({
+   476→        'کد و نام مشتری': c.customerName,
+   477→        'نام فروشنده': c.sellerName,
+   478→        'مسیر فعلی': c.currentRoute,
+   479→        'بلوک': c.blockName,
+   480→        'تغییر مسیر': c.routeChange,
+   481→        'آدرس': c.address,
+   482→        'منبع': c.source,
+   483→        'عرض جغرافیایی': c.lat,
+   484→        'طول جغرافیایی': c.lng,
+   485→      }));
+   486→
+   487→      const ws = XLSX.utils.json_to_sheet(data);
+   488→      const wb = XLSX.utils.book_new();
+   489→      XLSX.utils.book_append_sheet(wb, ws, 'مشتریان');
+   490→
+   491→      ws['!cols'] = [
+   492→        { wch: 35 }, { wch: 25 }, { wch: 35 }, { wch: 35 },
+   493→        { wch: 20 }, { wch: 50 }, { wch: 10 }, { wch: 15 }, { wch: 15 },
+   494→      ];
+   495→
+   496→      XLSX.writeFile(wb, 'tehran_customers.xlsx');
+   497→    } catch (err) {
+   498→      console.error('Export failed:', err);
+   499→    }
+   500→    setIsExporting(false);
+   501→  }, [getFilteredCustomers]);
+   502→
+   503→  // Save customer from dialog
+   504→  const handleSaveCustomer = useCallback((data: {
+   505→    customerName: string; sellerName: string; currentRoute: string; address: string; source: string;
+   506→  }) => {
+   507→    if (editDialog.customer) {
+   508→      updateCustomer(editDialog.customer.id, data);
+   509→    } else {
+   510→      addCustomer({
+   511→        id: `new-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+   512→        ...data,
+   513→        blockName: '',
+   514→        routeChange: '',
+   515→        lat: editDialog.lat,
+   516→        lng: editDialog.lng,
+   517→        isNew: true,
+   518→      });
+   519→    }
+   520→    setEditDialog({ open: false, customer: null, lat: 0, lng: 0 });
+   521→  }, [editDialog, addCustomer, updateCustomer]);
+   522→
+   523→  // Handle batch add
+   524→  const handleBatchAdd = useCallback(() => {
+   525→    const lines = batchText.trim().split('\n');
+   526→    const newCustomers: CustomerPoint[] = [];
+   527→
+   528→    for (const line of lines) {
+   529→      if (!line.trim()) continue;
+   530→      const parts = line.split(',').map((s) => s.trim());
+   531→      if (parts.length >= 1 && parts[0]) {
+   532→        const L = leafletRef.current;
+   533→        const map = mapRef.current as ReturnType<typeof L.map> | null;
+   534→        const center = map?.getCenter() || { lat: 35.6892, lng: 51.389 };
+   535→        newCustomers.push({
+   536→          id: `batch-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+   537→          customerName: parts[0] || '',
+   538→          sellerName: parts[1] || '',
+   539→          currentRoute: parts[2] || '',
+   540→          blockName: '',
+   541→          routeChange: '',
+   542→          address: parts[3] || '',
+   543→          source: batchSource,
+   544→          lat: center.lat + (Math.random() - 0.5) * 0.01,
+   545→          lng: center.lng + (Math.random() - 0.5) * 0.01,
+   546→          isNew: true,
+   547→        });
+   548→      }
+   549→    }
+   550→
+   551→    if (newCustomers.length > 0) {
+   552→      addCustomers(newCustomers);
+   553→      setBatchText('');
+   554→      setBatchDialog(false);
+   555→      setEditMode('editPoint');
+   556→    }
+   557→  }, [batchText, batchSource, addCustomers, setEditMode]);
+   558→
+   559→  // Remove selected customer
+   560→  const handleRemoveCustomer = useCallback(() => {
+   561→    if (editDialog.customer) {
+   562→      removeCustomer(editDialog.customer.id);
+   563→      setEditDialog({ open: false, customer: null, lat: 0, lng: 0 });
+   564→    }
+   565→  }, [editDialog.customer, removeCustomer]);
+   566→
+   567→  // Go to user location
+   568→  const goToUserLocation = useCallback(() => {
+   569→    const L = leafletRef.current;
+   570→    const map = mapRef.current as ReturnType<typeof L.map> | null;
+   571→    if (!navigator.geolocation || !map) return;
+   572→    navigator.geolocation.getCurrentPosition(
+   573→      (pos) => {
+   574→        const { latitude: lat, longitude: lng } = pos.coords;
+   575→        map.flyTo([lat, lng], 16, { duration: 1.5 });
+   576→      },
+   577→      () => {},
+   578→      { enableHighAccuracy: true }
+   579→    );
+   580→  }, []);
+   581→
+   582→  // Fly to district
+   583→  const flyToDistrict = useCallback((name: string) => {
+   584→    const L = leafletRef.current;
+   585→    const map = mapRef.current as ReturnType<typeof L.map> | null;
+   586→    if (!L || !map) return;
+   587→    const dist = districts.find((d) => d.name === name);
+   588→    if (dist) {
+   589→      const layer = L.geoJSON(dist.geometry as GeoJSON.GeometryObject);
+   590→      map.flyToBounds(layer.getBounds(), { padding: [20, 20], duration: 1 });
+   591→    }
+   592→  }, [districts]);
+   593→
+   594→  const mismatchCount = customers.filter(
+   595→    (c) => c.routeChange && c.routeChange !== 'بدون تغییر'
+   596→  ).length;
+   597→
+   598→  const filteredCustomers = getFilteredCustomers();
+   599→
+   600→  return (
+   601→    <div className="relative w-full h-screen h-[100dvh] flex" dir="rtl">
+   602→      {/* Sidebar Toggle (mobile) - always visible on mobile */}
+   603→      <button
+   604→        onClick={() => setShowSidebar(!showSidebar)}
+   605→        className="absolute top-3 right-3 z-[1001] lg:hidden bg-white dark:bg-gray-800 rounded-lg shadow-lg p-3 hover:bg-gray-50 dark:hover:bg-gray-700 active:bg-gray-100 dark:active:bg-gray-600 transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center"
+   606→        aria-label={showSidebar ? 'بستن منو' : 'باز کردن منو'}
+   607→      >
+   608→        {showSidebar ? (
+   609→          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+   610→        ) : (
+   611→          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
+   612→        )}
+   613→      </button>
+   614→
+   615→      {/* Mobile Backdrop - semi-transparent overlay when sidebar is open */}
+   616→      {showSidebar && (
+   617→        <div
+   618→          className="fixed inset-0 z-[998] bg-black/40 lg:hidden transition-opacity duration-300"
+   619→          onClick={() => setShowSidebar(false)}
+   620→          aria-hidden="true"
+   621→        />
+   622→      )}
+   623→
+   624→      {/* Sidebar - Bottom sheet on mobile (< lg), side panel on desktop (>= lg) */}
+   625→      <div
+   626→        className={`
+   627→          fixed inset-x-0 bottom-0 z-[999] w-full max-h-[60vh]
+   628→          lg:relative lg:inset-auto lg:bottom-auto lg:left-auto lg:right-auto
+   629→          lg:w-80 lg:max-h-none lg:h-full
+   630→          rounded-t-2xl lg:rounded-none
+   631→          bg-white dark:bg-gray-900
+   632→          border-t border-gray-200 dark:border-gray-700
+   633→          lg:border-t-0 lg:border-l
+   634→          overflow-y-auto
+   635→          flex flex-col
+   636→          transition-transform duration-300 ease-in-out
+   637→          ${showSidebar
+   638→            ? 'translate-y-0 lg:translate-x-0'
+   639→            : 'translate-y-full lg:translate-x-full pointer-events-none lg:pointer-events-auto'
+   640→          }
+   641→        `}
+   642→      >
+   643→        {/* Drag handle (mobile only) */}
+   644→        <div className="flex justify-center pt-2.5 pb-1 lg:hidden flex-shrink-0">
+   645→          <div className="w-10 h-1 bg-gray-300 dark:bg-gray-600 rounded-full" />
+   646→        </div>
+   647→
+   648→        {/* Close button (mobile only) - positioned in top-left (end side in RTL) */}
+   649→        <button
+   650→          onClick={() => setShowSidebar(false)}
+   651→          className="absolute top-2 left-2 z-10 lg:hidden bg-gray-100 dark:bg-gray-800 rounded-full min-h-[44px] min-w-[44px] flex items-center justify-center text-gray-500 hover:bg-gray-200 dark:hover:bg-gray-700 active:bg-gray-300 dark:active:bg-gray-600 transition-colors"
+   652→          aria-label="بستن"
+   653→        >
+   654→          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+   655→        </button>
+   656→
+   657→        {/* Header */}
+   658→        <div className="p-4 border-b border-gray-200 dark:border-gray-700 bg-gradient-to-l from-emerald-50 to-teal-50 dark:from-emerald-950/30 dark:to-teal-950/30 flex-shrink-0">
+   659→          <h1 className="text-lg font-bold text-gray-800 dark:text-gray-100 flex items-center gap-2">
+   660→            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" /></svg>
+   661→            نقشه تعاملی تهران
+   662→          </h1>
+   663→          <p className="text-xs text-gray-500 mt-1">مدیریت مشتریان و مسیرها</p>
+   664→        </div>
+   665→
+   666→        {/* Stats */}
+   667→        <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
+   668→          <div className="grid grid-cols-4 gap-1.5 text-center">
+   669→            <div className="bg-blue-50 dark:bg-blue-950/30 rounded-lg p-2 min-h-[56px] flex flex-col items-center justify-center">
+   670→              <div className="text-base font-bold text-blue-600">{customerCount.toLocaleString('fa-IR')}</div>
+   671→              <div className="text-[9px] text-gray-500">مشتری</div>
+   672→            </div>
+   673→            <div className="bg-emerald-50 dark:bg-emerald-950/30 rounded-lg p-2 min-h-[56px] flex flex-col items-center justify-center">
+   674→              <div className="text-base font-bold text-emerald-600">22</div>
+   675→              <div className="text-[9px] text-gray-500">منطقه</div>
+   676→            </div>
+   677→            <div className="bg-purple-50 dark:bg-purple-950/30 rounded-lg p-2 min-h-[56px] flex flex-col items-center justify-center">
+   678→              <div className="text-base font-bold text-purple-600">{customers.filter(c => c.source === 'بلده').length.toLocaleString('fa-IR')}</div>
+   679→              <div className="text-[9px] text-gray-500">بلده</div>
+   680→            </div>
+   681→            <div className="bg-amber-50 dark:bg-amber-950/30 rounded-lg p-2 min-h-[56px] flex flex-col items-center justify-center">
+   682→              <div className="text-base font-bold text-amber-600">{mismatchCount.toLocaleString('fa-IR')}</div>
+   683→              <div className="text-[9px] text-gray-500">عدم تطابق</div>
+   684→            </div>
+   685→          </div>
+   686→        </div>
+   687→
+   688→        {/* Search */}
+   689→        <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
+   690→          <input
+   691→            type="text"
+   692→            placeholder="جستجوی مشتری..."
+   693→            value={searchQuery}
+   694→            onChange={(e) => setSearchQuery(e.target.value)}
+   695→            className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 min-h-[44px]"
+   696→          />
+   697→        </div>
+   698→
+   699→        {/* Layers */}
+   700→        <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
+   701→          <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">لایه‌ها</h3>
+   702→          <div className="space-y-1">
+   703→            {[
+   704→              { key: 'districts' as const, label: 'مناطق شهرداری', color: 'bg-emerald-500' },
+   705→              { key: 'neighborhoods' as const, label: 'محله‌ها', color: 'bg-violet-500' },
+   706→              { key: 'routes' as const, label: 'مسیرها (پلی‌گون)', color: 'bg-orange-500' },
+   707→              { key: 'customers' as const, label: 'مشتریان', color: 'bg-blue-500' },
+   708→            ].map(({ key, label, color }) => (
+   709→              <label key={key} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 active:bg-gray-100 dark:active:bg-gray-700 rounded-lg px-2 py-2 min-h-[44px]">
+   710→                <div className={`w-3.5 h-3.5 rounded flex-shrink-0 ${color} ${layers[key] ? 'opacity-100' : 'opacity-30'}`} />
+   711→                <span className="text-gray-700 dark:text-gray-300 flex-1">{label}</span>
+   712→                <input
+   713→                  type="checkbox"
+   714→                  checked={layers[key]}
+   715→                  onChange={() => toggleLayer(key)}
+   716→                  className="accent-emerald-600 w-5 h-5 flex-shrink-0"
+   717→                />
+   718→              </label>
+   719→            ))}
+   720→          </div>
+   721→        </div>
+   722→
+   723→        {/* Mismatch Toggle */}
+   724→        <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
+   725→          <label className="flex items-center gap-2 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 active:bg-gray-100 dark:active:bg-gray-700 rounded-lg px-2 py-2 min-h-[44px]">
+   726→            <div className={`w-3.5 h-3.5 rounded flex-shrink-0 ${highlightMismatch ? 'bg-red-500' : 'bg-gray-300'}`} />
+   727→            <span className="text-sm text-gray-700 dark:text-gray-300 flex-1">نمایش عدم تطابق مسیر</span>
+   728→            <input
+   729→              type="checkbox"
+   730→              checked={highlightMismatch}
+   731→              onChange={toggleHighlightMismatch}
+   732→              className="accent-red-500 w-5 h-5 flex-shrink-0"
+   733→            />
+   734→          </label>
+   735→          {highlightMismatch && (
+   736→            <p className="text-xs text-red-500 mt-1 mr-5">
+   737→              نقاطی که مسیر ثبت‌شده با بلوک محل حضورشان مطابقت ندارد قرمز نمایش داده می‌شوند
+   738→            </p>
+   739→          )}
+   740→        </div>
+   741→
+   742→        {/* Tools */}
+   743→        <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
+   744→          <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">ابزارها</h3>
+   745→          <div className="grid grid-cols-2 gap-2">
+   746→            <button
+   747→              onClick={() => setEditMode(editMode === 'addCustomer' ? 'none' : 'addCustomer')}
+   748→              className={`text-xs px-2 py-2.5 rounded-lg border transition-colors min-h-[44px] ${
+   749→                editMode === 'addCustomer'
+   750→                  ? 'bg-emerald-500 text-white border-emerald-500'
+   751→                  : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 active:bg-gray-100 dark:active:bg-gray-700'
+   752→              }`}
+   753→            >
+   754→              + افزودن مشتری
+   755→            </button>
+   756→            <button
+   757→              onClick={() => setBatchDialog(true)}
+   758→              className="text-xs px-2 py-2.5 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 active:bg-gray-100 dark:active:bg-gray-700 transition-colors min-h-[44px]"
+   759→            >
+   760→              افزودن گروهی
+   761→            </button>
+   762→            <button
+   763→              onClick={() => setEditMode(editMode === 'editPoint' ? 'none' : 'editPoint')}
+   764→              className={`text-xs px-2 py-2.5 rounded-lg border transition-colors min-h-[44px] ${
+   765→                editMode === 'editPoint'
+   766→                  ? 'bg-amber-500 text-white border-amber-500'
+   767→                  : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 active:bg-gray-100 dark:active:bg-gray-700'
+   768→              }`}
+   769→            >
+   770→              ویرایش نقطه
+   771→            </button>
+   772→            <button
+   773→              onClick={() => setEditMode(editMode === 'editPolygon' ? 'none' : 'editPolygon')}
+   774→              className={`text-xs px-2 py-2.5 rounded-lg border transition-colors min-h-[44px] ${
+   775→                editMode === 'editPolygon'
+   776→                  ? 'bg-violet-500 text-white border-violet-500'
+   777→                  : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 active:bg-gray-100 dark:active:bg-gray-700'
+   778→              }`}
+   779→            >
+   780→              ویرایش پلی‌گون
+   781→            </button>
+   782→            <button
+   783→              onClick={goToUserLocation}
+   784→              className="text-xs px-2 py-2.5 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 active:bg-gray-100 dark:active:bg-gray-700 transition-colors col-span-2 min-h-[44px]"
+   785→            >
+   786→              📍 نمایش موقعیت من
+   787→            </button>
+   788→          </div>
+   789→        </div>
+   790→
+   791→        {/* Filter by District */}
+   792→        <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
+   793→          <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">فیلتر بر اساس منطقه</h3>
+   794→          <select
+   795→            value={selectedDistrict}
+   796→            onChange={(e) => {
+   797→              const val = e.target.value;
+   798→              setSelectedDistrict(val || '');
+   799→              if (val) flyToDistrict(val);
+   800→            }}
+   801→            className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 mb-2 min-h-[44px]"
+   802→          >
+   803→            <option value="">همه مناطق</option>
+   804→            {districtNames.map((d) => (
+   805→              <option key={d.name} value={d.name}>{d.name}</option>
+   806→            ))}
+   807→          </select>
+   808→
+   809→          {selectedDistrict && (
+   810→            <select
+   811→              value={selectedNeighborhood}
+   812→              onChange={(e) => setSelectedNeighborhood(e.target.value || '')}
+   813→              className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 min-h-[44px]"
+   814→            >
+   815→              <option value="">همه محله‌ها</option>
+   816→              {neighborhoodNames
+   817→                .filter((n) => n.district_name === selectedDistrict)
+   818→                .map((n) => (
+   819→                  <option key={n.name} value={n.name}>{n.name}</option>
+   820→                ))}
+   821→            </select>
+   822→          )}
+   823→        </div>
+   824→
+   825→        {/* Filter by Route */}
+   826→        <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
+   827→          <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">فیلتر بر اساس مسیر</h3>
+   828→          <select
+   829→            value={selectedRoute}
+   830→            onChange={(e) => setSelectedRoute(e.target.value || '')}
+   831→            className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 min-h-[44px]"
+   832→          >
+   833→            <option value="">همه مسیرها</option>
+   834→            {routeNames.map((r) => (
+   835→              <option key={r} value={r}>{r}</option>
+   836→            ))}
+   837→          </select>
+   838→        </div>
+   839→
+   840→        {/* Filter by Source */}
+   841→        <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
+   842→          <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">فیلتر بر اساس منبع</h3>
+   843→          <select
+   844→            value={selectedSource}
+   845→            onChange={(e) => setSelectedSource(e.target.value || '')}
+   846→            className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 min-h-[44px]"
+   847→          >
+   848→            <option value="">همه منابع</option>
+   849→            <option value="ورانگر">ورانگر</option>
+   850→            <option value="بلده">بلده</option>
+   851→          </select>
+   852→        </div>
+   853→
+   854→        {/* Active Filters */}
+   855→        {(selectedDistrict || selectedNeighborhood || selectedRoute || selectedSource || searchQuery) && (
+   856→          <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
+   857→            <div className="flex items-center justify-between min-h-[44px]">
+   858→              <span className="text-xs text-gray-500">فیلتر فعال: {filteredCustomers.length.toLocaleString('fa-IR')} مشتری</span>
+   859→              <button onClick={clearFilter} className="text-xs text-red-500 hover:text-red-700 active:text-red-800 min-h-[44px] px-3 flex items-center transition-colors">پاک‌سازی</button>
+   860→            </div>
+   861→          </div>
+   862→        )}
+   863→
+   864→        {/* Export */}
+   865→        <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
+   866→          <button
+   867→            onClick={handleExport}
+   868→            disabled={isExporting}
+   869→            className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white text-sm rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-2 min-h-[44px]"
+   870→          >
+   871→            {isExporting ? (
+   872→              <><span className="animate-spin inline-block">⟳</span> در حال خروجی...</>
+   873→            ) : (
+   874→              <>📥 خروجی اکسل ({filteredCustomers.length.toLocaleString('fa-IR')} مشتری)</>
+   875→            )}
+   876→          </button>
+   877→        </div>
+   878→
+   879→        {/* Mode indicator (sidebar) */}
+   880→        {editMode !== 'none' && (
+   881→          <div className="p-3 bg-amber-50 dark:bg-amber-950/30 flex-shrink-0">
+   882→            <div className="flex items-center justify-between min-h-[44px]">
+   883→              <span className="text-xs text-amber-700 dark:text-amber-400 font-medium flex-1">
+   884→                {editMode === 'addCustomer' && '👆 روی نقشه کلیک کنید تا مشتری اضافه شود'}
+   885→                {editMode === 'editPoint' && '✋ نقاط مشتریان را بکشید تا جابجا شوند'}
+   886→                {editMode === 'editPolygon' && '📐 روی پلی‌گون‌ها کلیک کنید تا ویرایش شوند'}
+   887→              </span>
+   888→              <button onClick={() => setEditMode('none')} className="text-red-500 hover:text-red-700 active:text-red-800 min-h-[44px] min-w-[44px] flex items-center justify-center transition-colors mr-2" aria-label="خروج از حالت ویرایش">✕</button>
+   889→            </div>
+   890→          </div>
+   891→        )}
+   892→
+   893→        {/* Selected Customer Info */}
+   894→        {selectedCustomer && (
+   895→          <div className="p-3 border-b border-gray-100 dark:border-gray-800 bg-blue-50 dark:bg-blue-950/30 flex-shrink-0">
+   896→            <h3 className="text-xs font-semibold text-blue-700 dark:text-blue-400 mb-1">مشتری انتخاب‌شده</h3>
+   897→            <p className="text-xs text-gray-600 dark:text-gray-400 truncate">{selectedCustomer.customerName}</p>
+   898→            <p className="text-xs text-gray-500 truncate">{selectedCustomer.address}</p>
+   899→          </div>
+   900→        )}
+   901→      </div>
+   902→
+   903→      {/* Map Container */}
+   904→      <div className="flex-1 relative min-w-0">
+   905→        {loading && (
+   906→          <div className="absolute inset-0 z-[999] flex items-center justify-center bg-white/80 dark:bg-gray-900/80">
+   907→            <div className="text-center p-6">
+   908→              <div className="animate-spin text-4xl mb-3 inline-block">⟳</div>
+   909→              <p className="text-sm text-gray-500">در حال بارگذاری داده‌ها...</p>
+   910→              <p className="text-xs text-gray-400 mt-1">لطفا صبر کنید</p>
+   911→            </div>
+   912→          </div>
+   913→        )}
+   914→        <div ref={mapContainerRef} className="w-full h-full" />
+   915→
+   916→        {/* Edit mode banner - smaller on mobile */}
+   917→        {editMode !== 'none' && (
+   918→          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[1000] bg-amber-500 text-white px-3 py-2 lg:px-4 lg:py-2 rounded-full text-xs lg:text-sm font-medium shadow-lg whitespace-nowrap max-w-[85vw] truncate">
+   919→            {editMode === 'addCustomer' && 'حالت افزودن مشتری - روی نقشه کلیک کنید'}
+   920→            {editMode === 'editPoint' && 'حالت ویرایش نقطه فعال'}
+   921→            {editMode === 'editPolygon' && 'حالت ویرایش پلی‌گون فعال'}
+   922→          </div>
+   923→        )}
+   924→      </div>
+   925→
+   926→      {/* Add/Edit Customer Dialog - bottom sheet on mobile, centered modal on desktop */}
+   927→      {editDialog.open && (
+   928→        <div className="fixed inset-0 z-[1001] flex items-end lg:items-center justify-center bg-black/50 p-0 lg:p-4 safe-area-bottom" onClick={() => setEditDialog({ open: false, customer: null, lat: 0, lng: 0 })}>
+   929→          <div className="bg-white dark:bg-gray-900 rounded-t-2xl lg:rounded-xl shadow-2xl w-full lg:max-w-md max-h-[90vh] overflow-y-auto p-5 pb-8 lg:p-6 lg:pb-6" dir="rtl" onClick={(e) => e.stopPropagation()}>
+   930→            {/* Drag handle for mobile */}
+   931→            <div className="flex justify-center mb-3 lg:hidden">
+   932→              <div className="w-10 h-1 bg-gray-300 dark:bg-gray-600 rounded-full" />
+   933→            </div>
+   934→
+   935→            <h2 className="text-lg font-bold text-gray-800 dark:text-gray-100 mb-4">
+   936→              {editDialog.customer ? 'ویرایش مشتری' : 'افزودن مشتری جدید'}
+   937→            </h2>
+   938→
+   939→            {!editDialog.customer && (
+   940→              <div className="mb-3 p-2.5 bg-gray-50 dark:bg-gray-800 rounded-lg text-xs text-gray-500">
+   941→                مختصات: {editDialog.lat.toFixed(6)}, {editDialog.lng.toFixed(6)}
+   942→              </div>
+   943→            )}
+   944→
+   945→            <div className="space-y-3">
+   946→              <div>
+   947→                <label htmlFor="dialog-customer-name" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">نام مشتری *</label>
+   948→                <input
+   949→                  id="dialog-customer-name"
+   950→                  type="text"
+   951→                  defaultValue={editDialog.customer?.customerName || ''}
+   952→                  className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 min-h-[44px]"
+   953→                  placeholder="نام و کد مشتری"
+   954→                />
+   955→              </div>
+   956→              <div>
+   957→                <label htmlFor="dialog-seller-name" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">نام فروشنده</label>
+   958→                <input
+   959→                  id="dialog-seller-name"
+   960→                  type="text"
+   961→                  defaultValue={editDialog.customer?.sellerName || ''}
+   962→                  className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 min-h-[44px]"
+   963→                  placeholder="نام فروشنده"
+   964→                />
+   965→              </div>
+   966→              <div>
+   967→                <label htmlFor="dialog-route" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">مسیر</label>
+   968→                <select
+   969→                  id="dialog-route"
+   970→                  defaultValue={editDialog.customer?.currentRoute || ''}
+   971→                  className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 min-h-[44px]"
+   972→                >
+   973→                  <option value="">انتخاب مسیر</option>
+   974→                  {routeNames.map((r) => (
+   975→                    <option key={r} value={r}>{r}</option>
+   976→                  ))}
+   977→                </select>
+   978→              </div>
+   979→              <div>
+   980→                <label htmlFor="dialog-address" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">آدرس</label>
+   981→                <textarea
+   982→                  id="dialog-address"
+   983→                  defaultValue={editDialog.customer?.address || ''}
+   984→                  rows={2}
+   985→                  className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 resize-none min-h-[88px]"
+   986→                  placeholder="آدرس مشتری"
+   987→                />
+   988→              </div>
+   989→              <div>
+   990→                <label htmlFor="dialog-source" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">منبع</label>
+   991→                <select
+   992→                  id="dialog-source"
+   993→                  defaultValue={editDialog.customer?.source || 'ورانگر'}
+   994→                  className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 min-h-[44px]"
+   995→                >
+   996→                  <option value="ورانگر">ورانگر</option>
+   997→                  <option value="بلده">بلده</option>
+   998→                </select>
+   999→              </div>
+  1000→            </div>
+  1001→
+  1002→            <div className="flex gap-2 mt-5">
+  1003→              <button
+  1004→                onClick={() => {
+  1005→                  const name = (document.getElementById('dialog-customer-name') as HTMLInputElement).value;
+  1006→                  const seller = (document.getElementById('dialog-seller-name') as HTMLInputElement).value;
+  1007→                  const route = (document.getElementById('dialog-route') as HTMLSelectElement).value;
+  1008→                  const address = (document.getElementById('dialog-address') as HTMLTextAreaElement).value;
+  1009→                  const source = (document.getElementById('dialog-source') as HTMLSelectElement).value;
+  1010→                  if (!name.trim()) return;
+  1011→                  handleSaveCustomer({ customerName: name, sellerName: seller, currentRoute: route, address, source });
+  1012→                }}
+  1013→                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white text-sm rounded-lg transition-colors min-h-[44px] font-medium"
+  1014→              >
+  1015→                {editDialog.customer ? 'ذخیره تغییرات' : 'افزودن'}
+  1016→              </button>
+  1017→              {editDialog.customer && (
+  1018→                <button
+  1019→                  onClick={handleRemoveCustomer}
+  1020→                  className="py-2.5 px-4 bg-red-500 hover:bg-red-600 active:bg-red-700 text-white text-sm rounded-lg transition-colors min-h-[44px]"
+  1021→                >
+  1022→                  حذف
+  1023→                </button>
+  1024→              )}
+  1025→              <button
+  1026→                onClick={() => setEditDialog({ open: false, customer: null, lat: 0, lng: 0 })}
+  1027→                className="py-2.5 px-4 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 text-sm rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 active:bg-gray-100 dark:active:bg-gray-700 transition-colors min-h-[44px]"
+  1028→              >
+  1029→                انصراف
+  1030→              </button>
+  1031→            </div>
+  1032→          </div>
+  1033→        </div>
+  1034→      )}
+  1035→
+  1036→      {/* Batch Add Dialog - bottom sheet on mobile, centered modal on desktop */}
+  1037→      {batchDialog && (
+  1038→        <div className="fixed inset-0 z-[1001] flex items-end lg:items-center justify-center bg-black/50 p-0 lg:p-4 safe-area-bottom" onClick={() => setBatchDialog(false)}>
+  1039→          <div className="bg-white dark:bg-gray-900 rounded-t-2xl lg:rounded-xl shadow-2xl w-full lg:max-w-lg max-h-[90vh] overflow-y-auto p-5 pb-8 lg:p-6 lg:pb-6" dir="rtl" onClick={(e) => e.stopPropagation()}>
+  1040→            {/* Drag handle for mobile */}
+  1041→            <div className="flex justify-center mb-3 lg:hidden">
+  1042→              <div className="w-10 h-1 bg-gray-300 dark:bg-gray-600 rounded-full" />
+  1043→            </div>
+  1044→
+  1045→            <h2 className="text-lg font-bold text-gray-800 dark:text-gray-100 mb-2">افزودن گروهی مشتریان</h2>
+  1046→            <p className="text-xs text-gray-500 mb-4">
+  1047→              هر خط یک مشتری. فرمت: نام مشتری, نام فروشنده, مسیر, آدرس
+  1048→            </p>
+  1049→            <textarea
+  1050→              value={batchText}
+  1051→              onChange={(e) => setBatchText(e.target.value)}
+  1052→              rows={8}
+  1053→              className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 resize-none font-mono min-h-[120px]"
+  1054→              placeholder={`سوپر مارکت نمونه, علی محمدی, غرب - 110002024-مطهری, آدرس نمونه\nفروشگاه نمونه 2, رضا احمدی, شرق - 17 شهريور, آدرس نمونه 2`}
+  1055→            />
+  1056→            <div className="flex items-center gap-3 mt-2">
+  1057→              <div className="flex-1">
+  1058→                <label htmlFor="batch-source" className="block text-xs text-gray-500 mb-1">منبع مشتریان</label>
+  1059→                <select
+  1060→                  id="batch-source"
+  1061→                  value={batchSource}
+  1062→                  onChange={(e) => setBatchSource(e.target.value)}
+  1063→                  className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 min-h-[44px]"
+  1064→                >
+  1065→                  <option value="ورانگر">ورانگر</option>
+  1066→                  <option value="بلده">بلده</option>
+  1067→                </select>
+  1068→              </div>
+  1069→            </div>
+  1070→            <p className="text-xs text-gray-400 mt-2">
+  1071→              مشتریان در مرکز نقشه قرار می‌گیرند و می‌توانید آنها را جابجا کنید.
+  1072→            </p>
+  1073→            <div className="flex gap-2 mt-4">
+  1074→              <button
+  1075→                onClick={handleBatchAdd}
+  1076→                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white text-sm rounded-lg transition-colors min-h-[44px] font-medium"
+  1077→              >
+  1078→                افزودن ({batchText.trim().split('\n').filter((l) => l.trim()).length} مشتری)
+  1079→              </button>
+  1080→              <button
+  1081→                onClick={() => setBatchDialog(false)}
+  1082→                className="py-2.5 px-4 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 text-sm rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 active:bg-gray-100 dark:active:bg-gray-700 transition-colors min-h-[44px]"
+  1083→              >
+  1084→                انصراف
+  1085→              </button>
+  1086→            </div>
+  1087→          </div>
+  1088→        </div>
+  1089→      )}
+  1090→    </div>
+  1091→  );
+  1092→}
