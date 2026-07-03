@@ -341,13 +341,14 @@ export default function InteractiveMap() {
 
     displayCustomers.forEach((customer) => {
       const isMismatch = highlightMismatch && customer.routeChange && customer.routeChange !== 'بدون تغییر';
-      const color = isMismatch ? '#ef4444' : (customer.isNew ? '#22c55e' : '#3b82f6');
+      const sourceColor = customer.source === 'بلده' ? '#f59e0b' : '#3b82f6';
+      const color = isMismatch ? '#ef4444' : (customer.isNew ? '#22c55e' : sourceColor);
       const radius = isMismatch ? 6 : 4;
 
       const marker = L.circleMarker([customer.lat, customer.lng], {
         radius,
         fillColor: color,
-        color: isMismatch ? '#dc2626' : '#1d4ed8',
+        color: isMismatch ? '#dc2626' : (customer.source === 'بلده' ? '#d97706' : '#1d4ed8'),
         weight: 1.5,
         opacity: 1,
         fillOpacity: 0.8,
@@ -930,6 +931,26 @@ export default function InteractiveMap() {
           <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[1000] bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 px-4 py-2 rounded-full text-xs font-medium shadow-lg flex items-center gap-2">
             <span className="animate-spin inline-block">⟳</span>
             در حال بارگذاری مشتریان...
+          </div>
+        )}
+
+        {/* Source Legend */}
+        {hasFilter && (
+          <div className="absolute bottom-4 left-3 z-[1000] bg-white/90 dark:bg-gray-900/90 backdrop-blur-sm rounded-lg shadow-lg p-2.5 text-xs space-y-1.5 border border-gray-200 dark:border-gray-700">
+            <div className="flex items-center gap-2">
+              <span className="w-3 h-3 rounded-full bg-blue-500 border border-blue-700 flex-shrink-0"></span>
+              <span className="text-gray-700 dark:text-gray-300">ورانگر</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="w-3 h-3 rounded-full bg-amber-500 border border-amber-600 flex-shrink-0"></span>
+              <span className="text-gray-700 dark:text-gray-300">بلده</span>
+            </div>
+            {highlightMismatch && (
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded-full bg-red-500 border border-red-700 flex-shrink-0"></span>
+                <span className="text-gray-700 dark:text-gray-300">عدم تطابق</span>
+              </div>
+            )}
           </div>
         )}
 
