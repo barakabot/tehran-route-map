@@ -264,8 +264,8 @@ export default function InteractiveMap() {
           weight: 1.5,
           fillColor: nColor,
           fillOpacity: selectedNeighborhood === n.name ? 0.45 : 0.15,
-          opacity: selectedNeighborhood === n.name ? 1 : 0.6,
-          weight: selectedNeighborhood === n.name ? 3 : 1.5,
+          opacity: selectedNeighborhood === n.name ? 1 : 0.9,
+          weight: selectedNeighborhood === n.name ? 3 : 2.5,
           dashArray: selectedNeighborhood === n.name ? '' : '4, 4',
         },
       });
