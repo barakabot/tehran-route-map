@@ -242,12 +242,27 @@ export default function InteractiveMap() {
     nl.clearLayers();
     if (!layers.neighborhoods) return;
 
+    // Color neighborhoods by district using a palette
+    const neighborhoodColorMap = new Map<string, string>();
+    const NEIGHBORHOOD_PALETTE = [
+      '#8b5cf6', '#06b6d4', '#10b981', '#f59e0b', '#ef4444',
+      '#ec4899', '#6366f1', '#14b8a6', '#84cc16', '#f97316',
+      '#e11d48', '#a855f7', '#0ea5e9', '#22c55e', '#eab308',
+      '#d946ef', '#3b82f6', '#059669', '#65a30d', '#ea580c',
+      '#be185d', '#7c3aed', '#0891b2', '#16a34a', '#ca8a04',
+    ];
+    const districtNamesList = [...new Set(neighborhoods.map(n => n.district_name))];
+    districtNamesList.forEach((dName, i) => {
+      neighborhoodColorMap.set(dName, NEIGHBORHOOD_PALETTE[i % NEIGHBORHOOD_PALETTE.length]);
+    });
+
     neighborhoods.forEach((n) => {
+      const nColor = neighborhoodColorMap.get(n.district_name) || '#818cf8';
       const geojson = L.geoJSON(n.geometry as GeoJSON.GeometryObject, {
         style: {
-          color: '#6366f1',
+          color: nColor,
           weight: 1.5,
-          fillColor: '#818cf8',
+          fillColor: nColor,
           fillOpacity: 0.1,
           opacity: 0.5,
           dashArray: '4, 4',
@@ -936,14 +951,21 @@ export default function InteractiveMap() {
 
         {/* Source Legend */}
         {hasFilter && (
-          <div className="absolute bottom-4 left-3 z-[1000] bg-white/90 dark:bg-gray-900/90 backdrop-blur-sm rounded-lg shadow-lg p-2.5 text-xs space-y-1.5 border border-gray-200 dark:border-gray-700">
-            <div className="flex items-center gap-2">
-              <span className="w-3 h-3 rounded-full bg-blue-500 border border-blue-700 flex-shrink-0"></span>
-              <span className="text-gray-700 dark:text-gray-300">ورانگر</span>
+          <div className="absolute bottom-4 left-3 z-[1000] bg-white/90 dark:bg-gray-900/90 backdrop-blur-sm rounded-lg shadow-lg p-2.5 text-xs space-y-1.5 border border-gray-200 dark:border-gray-700 min-w-[120px]">
+            <div className="font-semibold text-gray-600 dark:text-gray-400 mb-0.5">راهنما</div>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded-full bg-blue-500 border border-blue-700 flex-shrink-0"></span>
+                <span className="text-gray-700 dark:text-gray-300">ورانگر</span>
+              </div>
+              <span className="font-bold text-blue-600">{((isFiltered && stats.filteredSourceCounts?.['ورانگر']) || stats.sourceCounts?.['ورانگر'] || 0).toLocaleString('fa-IR')}</span>
             </div>
-            <div className="flex items-center gap-2">
-              <span className="w-3 h-3 rounded-full bg-amber-500 border border-amber-600 flex-shrink-0"></span>
-              <span className="text-gray-700 dark:text-gray-300">بلده</span>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded-full bg-amber-500 border border-amber-600 flex-shrink-0"></span>
+                <span className="text-gray-700 dark:text-gray-300">بلده</span>
+              </div>
+              <span className="font-bold text-amber-600">{((isFiltered && stats.filteredSourceCounts?.['بلده']) || stats.sourceCounts?.['بلده'] || 0).toLocaleString('fa-IR')}</span>
             </div>
             {highlightMismatch && (
               <div className="flex items-center gap-2">
