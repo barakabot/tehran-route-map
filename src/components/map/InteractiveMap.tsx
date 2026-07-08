@@ -357,14 +357,16 @@ export default function InteractiveMap() {
 
     displayCustomers.forEach((customer) => {
       const isMismatch = highlightMismatch && customer.routeChange && customer.routeChange !== 'بدون تغییر';
-      const sourceColor = customer.source === 'بلده' ? '#f59e0b' : '#3b82f6';
+      const sourceColors: Record<string, string> = { 'بلده': '#f59e0b', 'SNAPP_EXPRESS': '#10b981' };
+      const sourceBorderColors: Record<string, string> = { 'بلده': '#d97706', 'SNAPP_EXPRESS': '#059669' };
+      const sourceColor = sourceColors[customer.source] || '#3b82f6';
       const color = isMismatch ? '#ef4444' : (customer.isNew ? '#22c55e' : sourceColor);
       const radius = isMismatch ? 6 : 4;
 
       const marker = L.circleMarker([customer.lat, customer.lng], {
         radius,
         fillColor: color,
-        color: isMismatch ? '#dc2626' : (customer.source === 'بلده' ? '#d97706' : '#1d4ed8'),
+        color: isMismatch ? '#dc2626' : (sourceBorderColors[customer.source] || '#1d4ed8'),
         weight: 1.5,
         opacity: 1,
         fillOpacity: 0.8,
@@ -967,6 +969,13 @@ export default function InteractiveMap() {
                 <span className="text-gray-700 dark:text-gray-300">بلده</span>
               </div>
               <span className="font-bold text-amber-600">{((isFiltered && stats.filteredSourceCounts?.['بلده']) || stats.sourceCounts?.['بلده'] || 0).toLocaleString('fa-IR')}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded-full bg-emerald-500 border border-emerald-600 flex-shrink-0"></span>
+                <span className="text-gray-700 dark:text-gray-300">اسنپ</span>
+              </div>
+              <span className="font-bold text-emerald-600">{((isFiltered && stats.filteredSourceCounts?.['SNAPP_EXPRESS']) || stats.sourceCounts?.['SNAPP_EXPRESS'] || 0).toLocaleString('fa-IR')}</span>
             </div>
             {highlightMismatch && (
               <div className="flex items-center gap-2">
