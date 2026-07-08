@@ -263,9 +263,10 @@ export default function InteractiveMap() {
           color: nColor,
           weight: 1.5,
           fillColor: nColor,
-          fillOpacity: 0.1,
-          opacity: 0.5,
-          dashArray: '4, 4',
+          fillOpacity: selectedNeighborhood === n.name ? 0.45 : 0.15,
+          opacity: selectedNeighborhood === n.name ? 1 : 0.6,
+          weight: selectedNeighborhood === n.name ? 3 : 1.5,
+          dashArray: selectedNeighborhood === n.name ? '' : '4, 4',
         },
       });
 
@@ -273,7 +274,7 @@ export default function InteractiveMap() {
         const l = layer as L.Polygon;
         l.bindTooltip(n.name, { sticky: true, direction: 'top' });
         l.on('click', () => {
-          setSelectedNeighborhood(n.name);
+          setSelectedNeighborhood(selectedNeighborhood === n.name ? '' : n.name);
         });
         if (editMode === 'editPolygon') {
           l.pm?.enable({ allowSelfIntersection: false });
@@ -282,7 +283,7 @@ export default function InteractiveMap() {
 
       nl.addLayer(geojson);
     });
-  }, [neighborhoods, layers.neighborhoods, editMode, setSelectedNeighborhood]);
+  }, [neighborhoods, layers.neighborhoods, editMode, selectedNeighborhood, setSelectedNeighborhood]);
 
   // Render route block polygons (from database - real polygons)
   useEffect(() => {
