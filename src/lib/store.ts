@@ -1,6 +1,29 @@
 import { create } from 'zustand';
 import type { CustomerPoint, MapLayerType, FilterMode } from './types';
 
+export interface RoutingWaypoint {
+  customer: CustomerPoint;
+  order: number;
+}
+
+export interface RouteResult {
+  distance: number;
+  duration: number;
+  geometry: GeoJSON.LineString;
+  legs: Array<{
+    distance: number;
+    duration: number;
+    steps: Array<{
+      distance: number;
+      duration: number;
+      instruction: string;
+      type: string;
+      name: string;
+      geometry: GeoJSON.LineString;
+    }>;
+  }>;
+}
+
 interface MapStore {
   // Layer visibility
   layers: MapLayerType;
@@ -51,6 +74,19 @@ interface MapStore {
   // Source filter
   selectedSource: string;
   setSelectedSource: (s: string) => void;
+
+  // Routing
+  routingMode: boolean;
+  setRoutingMode: (v: boolean) => void;
+  routingWaypoints: RoutingWaypoint[];
+  addRoutingWaypoint: (customer: CustomerPoint) => void;
+  removeRoutingWaypoint: (customerId: string) => void;
+  clearRoutingWaypoints: () => void;
+  reorderRoutingWaypoints: (fromIndex: number, toIndex: number) => void;
+  routeResult: RouteResult | null;
+  setRouteResult: (r: RouteResult | null) => void;
+  routingLoading: boolean;
+  setRoutingLoading: (v: boolean) => void;
 }
 
 export const useMapStore = create<MapStore>((set) => ({
@@ -120,4 +156,33 @@ export const useMapStore = create<MapStore>((set) => ({
 
   selectedSource: '',
   setSelectedSource: (s) => set({ selectedSource: s }),
+
+  // Routing
+  routingMode: false,
+  setRoutingMode: (v) => set({ routingMode: v, routingWaypoints: [], routeResult: null }),
+  routingWaypoints: [],
+  addRoutingWaypoint: (customer) =>
+    set((state) => {
+      if (state.routingWaypoints.some((w) => w.customer.id === customer.id)) {
+        return { routingWaypoints: state.routingWaypoints.filter((w) => w.customer.id !== customer.id) };
+      }
+      return { routingWaypoints: [...state.routingWaypoints, { customer, order: state.routingWaypoints.length }] };
+    }),
+  removeRoutingWaypoint: (customerId) =>
+    set((state) => ({
+      routingWaypoints: state.routingWaypoints.filter((w) => w.customer.id !== customerId),
+      routeResult: null,
+    })),
+  clearRoutingWaypoints: () => set({ routingWaypoints: [], routeResult: null }),
+  reorderRoutingWaypoints: (fromIndex, toIndex) =>
+    set((state) => {
+      const wp = [...state.routingWaypoints];
+      const [moved] = wp.splice(fromIndex, 1);
+      wp.splice(toIndex, 0, moved);
+      return { routingWaypoints: wp, routeResult: null };
+    }),
+  routeResult: null,
+  setRouteResult: (r) => set({ routeResult: r }),
+  routingLoading: false,
+  setRoutingLoading: (v) => set({ routingLoading: v }),
 }));

@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useCallback, useState } from 'react';
-import { useMapStore } from '@/lib/store';
+import { useMapStore, type RouteResult } from '@/lib/store';
 import type { CustomerPoint } from '@/lib/types';
 
 // Color palette for districts
@@ -12,6 +12,16 @@ const DISTRICT_COLORS = [
   '#aaffc3', '#808000', '#ffd8b1', '#000075', '#a9a9a9',
   '#e6194b', '#3cb44b',
 ];
+
+// Calculate bearing between two points for arrow rotation
+function bearing(from: [number, number], to: [number, number]): number {
+  const dLng = ((to[1] - from[1]) * Math.PI) / 180;
+  const lat1 = (from[0] * Math.PI) / 180;
+  const lat2 = (to[0] * Math.PI) / 180;
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
 
 // Route block type
 interface RouteBlock {
@@ -39,6 +49,8 @@ export default function InteractiveMap() {
   const neighborhoodLayerRef = useRef<unknown>(null);
   const userMarkerRef = useRef<unknown>(null);
   const routeLayerRef = useRef<unknown>(null);
+  const routingLayerRef = useRef<unknown>(null);
+  const waypointMarkerLayerRef = useRef<unknown>(null);
   const leafletRef = useRef<typeof import('leaflet') | null>(null);
 
   const [isExporting, setIsExporting] = useState(false);
@@ -72,6 +84,9 @@ export default function InteractiveMap() {
     setSelectedDistrict, setSelectedNeighborhood, setSelectedRoute,
     searchQuery, setSearchQuery,
     selectedSource, setSelectedSource,
+    routingMode, setRoutingMode,
+    routingWaypoints, addRoutingWaypoint, removeRoutingWaypoint, clearRoutingWaypoints,
+    routeResult, setRouteResult, routingLoading, setRoutingLoading,
   } = useMapStore();
 
   // Dynamically import leaflet and plugins
@@ -126,6 +141,8 @@ export default function InteractiveMap() {
       districtLayerRef.current = L.layerGroup().addTo(map);
       neighborhoodLayerRef.current = L.layerGroup().addTo(map);
       routeLayerRef.current = L.layerGroup().addTo(map);
+      routingLayerRef.current = L.layerGroup().addTo(map);
+      waypointMarkerLayerRef.current = L.layerGroup().addTo(map);
 
       map.on('click', (e: { latlng: { lat: number; lng: number } }) => {
         if (editMode === 'addCustomer') {
@@ -391,6 +408,10 @@ export default function InteractiveMap() {
       });
 
       marker.on('click', () => {
+        if (routingMode) {
+          addRoutingWaypoint(customer);
+          return;
+        }
         setSelectedCustomer(customer);
         setEditDialog({ open: true, customer, lat: customer.lat, lng: customer.lng });
       });
@@ -424,7 +445,111 @@ export default function InteractiveMap() {
 
       cl.addLayer(marker);
     });
-  }, [displayCustomers, layers.customers, editMode, highlightMismatch, setSelectedCustomer, updateCustomer]);
+  }, [displayCustomers, layers.customers, editMode, highlightMismatch, setSelectedCustomer, updateCustomer, routingMode, addRoutingWaypoint]);
+
+  // Draw routing waypoints on map
+  useEffect(() => {
+    const L = leafletRef.current;
+    if (!L || !waypointMarkerLayerRef.current) return;
+    const wml = waypointMarkerLayerRef.current as ReturnType<typeof L.layerGroup>;
+    wml.clearLayers();
+    if (!routingMode) return;
+
+    routingWaypoints.forEach((wp, idx) => {
+      const isStart = idx === 0;
+      const isEnd = idx === routingWaypoints.length - 1 && routingWaypoints.length > 1;
+
+      const markerIcon = L.divIcon({
+        html: `<div style="
+          width:${isStart || isEnd ? 28 : 24}px;
+          height:${isStart || isEnd ? 28 : 24}px;
+          background:${isStart ? '#10b981' : isEnd ? '#ef4444' : '#f59e0b'};
+          border:3px solid white;
+          border-radius:50%;
+          box-shadow:0 2px 8px rgba(0,0,0,0.3);
+          display:flex;align-items:center;justify-content:center;
+          color:white;font-size:${isStart || isEnd ? 13 : 11}px;font-weight:bold;
+        ">${idx + 1}</div>`,
+        className: '',
+        iconSize: [isStart || isEnd ? 28 : 24, isStart || isEnd ? 28 : 24],
+        iconAnchor: [isStart || isEnd ? 14 : 12, isStart || isEnd ? 14 : 12],
+      });
+
+      const marker = L.marker([wp.customer.lat, wp.customer.lng], { icon: markerIcon, zIndexOffset: 1000 });
+      marker.bindTooltip(
+        `<div style="direction:rtl;text-align:right;font-size:12px;">
+          <strong>${wp.customer.customerName}</strong><br/>
+          <span style="color:#666;">ایستگاه ${idx + 1}</span>
+        </div>`,
+        { sticky: true, direction: 'top', className: 'custom-tooltip' }
+      );
+      wml.addLayer(marker);
+    });
+  }, [routingMode, routingWaypoints]);
+
+  // Draw route polyline on map
+  useEffect(() => {
+    const L = leafletRef.current;
+    if (!L || !routingLayerRef.current) return;
+    const rl = routingLayerRef.current as ReturnType<typeof L.layerGroup>;
+    rl.clearLayers();
+    if (!routeResult) return;
+
+    const coords = routeResult.geometry.coordinates.map(
+      (c: number[]) => [c[1], c[0]] as [number, number]
+    );
+
+    // Draw the main route line with an animated dashed background
+    const bgLine = L.polyline(coords, {
+      color: '#1e40af',
+      weight: 8,
+      opacity: 0.2,
+      lineCap: 'round',
+      lineJoin: 'round',
+    });
+    rl.addLayer(bgLine);
+
+    const mainLine = L.polyline(coords, {
+      color: '#3b82f6',
+      weight: 5,
+      opacity: 0.9,
+      lineCap: 'round',
+      lineJoin: 'round',
+      dashArray: '12, 8',
+    });
+    rl.addLayer(mainLine);
+
+    // Add direction arrows along the route
+    for (let i = 0; i < coords.length - 1; i += Math.max(1, Math.floor(coords.length / 15))) {
+      const arrowIcon = L.divIcon({
+        html: `<div style="color:#1e40af;font-size:14px;transform:rotate(${bearing(coords[i], coords[Math.min(i + 1, coords.length - 1)])}deg);line-height:1;">▲</div>`,
+        className: '',
+        iconSize: [14, 14],
+        iconAnchor: [7, 7],
+      });
+      const arrow = L.marker(coords[i], { icon: arrowIcon, interactive: false });
+      rl.addLayer(arrow);
+    }
+
+    // Fit map to route bounds
+    const map = mapRef.current as ReturnType<typeof L.map> | null;
+    if (map) {
+      map.fitBounds(mainLine.getBounds(), { padding: [60, 60], duration: 1 });
+    }
+  }, [routeResult]);
+
+  // Clear routing layers when exiting routing mode
+  useEffect(() => {
+    if (!routingMode) {
+      const L = leafletRef.current;
+      if (L && routingLayerRef.current) {
+        (routingLayerRef.current as ReturnType<typeof L.layerGroup>).clearLayers();
+      }
+      if (L && waypointMarkerLayerRef.current) {
+        (waypointMarkerLayerRef.current as ReturnType<typeof L.layerGroup>).clearLayers();
+      }
+    }
+  }, [routingMode]);
 
   // User location
   useEffect(() => {
@@ -580,6 +705,47 @@ export default function InteractiveMap() {
       { enableHighAccuracy: true }
     );
   }, []);
+
+  // Calculate route via OSRM
+  const calculateRoute = useCallback(async () => {
+    if (routingWaypoints.length < 2) return;
+    setRoutingLoading(true);
+    setRouteResult(null);
+    try {
+      const coords = routingWaypoints
+        .map((w) => `${w.customer.lng},${w.customer.lat}`)
+        .join(';');
+      const res = await fetch(`/api/osrm/route?coords=${coords}`);
+      const data = await res.json();
+      if (data.error) {
+        console.error('Routing error:', data.error);
+        setRoutingLoading(false);
+        return;
+      }
+      const route = data.routes[0];
+      setRouteResult({
+        distance: route.distance,
+        duration: route.duration,
+        geometry: route.geometry,
+        legs: route.legs || [],
+      });
+    } catch (err) {
+      console.error('Routing failed:', err);
+    }
+    setRoutingLoading(false);
+  }, [routingWaypoints, setRouteResult, setRoutingLoading]);
+
+  // Format distance/duration helpers
+  const formatDistance = (m: number) => {
+    if (m >= 1000) return `${(m / 1000).toFixed(1)} km`;
+    return `${Math.round(m)} m`;
+  };
+  const formatDuration = (s: number) => {
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    if (h > 0) return `${h} ساعت ${m} دقیقه`;
+    return `${m} دقیقه`;
+  };
 
   // Fly to district
   const flyToDistrict = useCallback((name: string) => {
@@ -806,8 +972,130 @@ export default function InteractiveMap() {
             >
               📍 نمایش موقعیت من
             </button>
+            <button
+              onClick={() => {
+                if (routingMode) {
+                  setRoutingMode(false);
+                } else {
+                  setEditMode('none');
+                  setRoutingMode(true);
+                }
+              }}
+              className={`text-xs px-2 py-2.5 rounded-lg border transition-colors col-span-2 min-h-[44px] font-medium ${
+                routingMode
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 active:bg-gray-100 dark:active:bg-gray-700'
+              }`}
+            >
+              {routingMode ? '✕ خروج از مسیریابی' : '🚗 مسیریابی بین مشتریان'}
+            </button>
           </div>
         </div>
+
+        {/* Routing Panel */}
+        {routingMode && (
+          <div className="p-3 border-b border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/30 flex-shrink-0">
+            <h3 className="text-sm font-semibold text-blue-700 dark:text-blue-400 mb-2">مسیریابی</h3>
+            <p className="text-[11px] text-blue-600 dark:text-blue-400 mb-2">
+              {routingWaypoints.length === 0
+                ? 'روی نقاط مشتریان کلیک کنید تا اضافه شوند'
+                : `${routingWaypoints.length} نقطه انتخاب شده`}
+            </p>
+
+            {/* Waypoint list */}
+            {routingWaypoints.length > 0 && (
+              <div className="space-y-1 mb-3 max-h-48 overflow-y-auto">
+                {routingWaypoints.map((wp, idx) => (
+                  <div
+                    key={wp.customer.id}
+                    className="flex items-center gap-2 bg-white dark:bg-gray-800 rounded-lg px-2 py-1.5 border border-blue-100 dark:border-blue-900"
+                  >
+                    <span className={`w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold flex-shrink-0 ${
+                      idx === 0 ? 'bg-emerald-500' : idx === routingWaypoints.length - 1 ? 'bg-red-500' : 'bg-amber-500'
+                    }`}>
+                      {idx + 1}
+                    </span>
+                    <span className="text-xs text-gray-700 dark:text-gray-300 truncate flex-1" title={wp.customer.customerName}>
+                      {wp.customer.customerName}
+                    </span>
+                    {idx > 0 && (
+                      <button
+                        onClick={() => removeRoutingWaypoint(wp.customer.id)}
+                        className="text-red-400 hover:text-red-600 active:text-red-800 min-w-[32px] min-h-[32px] flex items-center justify-center transition-colors"
+                        aria-label="حذف"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Route action buttons */}
+            <div className="flex gap-2">
+              <button
+                onClick={calculateRoute}
+                disabled={routingWaypoints.length < 2 || routingLoading}
+                className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white text-xs rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5 min-h-[44px] font-medium"
+              >
+                {routingLoading ? (
+                  <><span className="animate-spin inline-block">⟳</span> در حال مسیریابی...</>
+                ) : (
+                  <>🚗 محاسبه مسیر ({routingWaypoints.length} نقطه)</>
+                )}
+              </button>
+              {(routingWaypoints.length > 0 || routeResult) && (
+                <button
+                  onClick={() => { clearRoutingWaypoints(); setRouteResult(null); }}
+                  className="py-2.5 px-3 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 text-xs rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 active:bg-gray-100 dark:active:bg-gray-700 transition-colors min-h-[44px]"
+                >
+                  پاک‌سازی
+                </button>
+              )}
+            </div>
+
+            {/* Route result */}
+            {routeResult && (
+              <div className="mt-3 bg-white dark:bg-gray-800 rounded-lg p-2.5 border border-blue-100 dark:border-blue-900 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-gray-500">مسافت کل</span>
+                  <span className="text-sm font-bold text-blue-700 dark:text-blue-400">{formatDistance(routeResult.distance)}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-gray-500">زمان تخمینی</span>
+                  <span className="text-sm font-bold text-blue-700 dark:text-blue-400">{formatDuration(routeResult.duration)}</span>
+                </div>
+                {routeResult.legs.length > 1 && (
+                  <div className="pt-1.5 border-t border-gray-100 dark:border-gray-700">
+                    <span className="text-[10px] text-gray-400">{routeResult.legs.length} بخش مسیر</span>
+                  </div>
+                )}
+                {/* Step-by-step turn-by-turn */}
+                {routeResult.legs.length > 0 && routeResult.legs[0].steps.length > 0 && (
+                  <div className="pt-1.5 border-t border-gray-100 dark:border-gray-700 max-h-32 overflow-y-auto">
+                    <span className="text-[10px] text-gray-500 font-medium">مسیر حرکت:</span>
+                    <div className="mt-1 space-y-0.5">
+                      {routeResult.legs.flatMap(l => l.steps).slice(0, 10).map((step, i) => (
+                        <div key={i} className="text-[10px] text-gray-600 dark:text-gray-400 flex items-start gap-1">
+                          <span className="text-blue-400 flex-shrink-0 mt-px">•</span>
+                          <span className="truncate">
+                            {step.name ? `${step.name} - ` : ''}{formatDistance(step.distance)}
+                          </span>
+                        </div>
+                      ))}
+                      {routeResult.legs.flatMap(l => l.steps).length > 10 && (
+                        <div className="text-[10px] text-gray-400">
+                          و {routeResult.legs.flatMap(l => l.steps).length - 10} مرحله دیگر...
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Filter by District */}
         <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
@@ -992,6 +1280,30 @@ export default function InteractiveMap() {
             {editMode === 'addCustomer' && 'حالت افزودن مشتری - روی نقشه کلیک کنید'}
             {editMode === 'editPoint' && 'حالت ویرایش نقطه فعال'}
             {editMode === 'editPolygon' && 'حالت ویرایش پلی‌گون فعال'}
+          </div>
+        )}
+
+        {/* Routing mode banner */}
+        {routingMode && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[1000] bg-blue-600 text-white px-3 py-2 lg:px-4 lg:py-2 rounded-full text-xs lg:text-sm font-medium shadow-lg whitespace-nowrap max-w-[85vw] truncate">
+            🚗 حالت مسیریابی - روی نقاط مشتریان کلیک کنید ({routingWaypoints.length} نقطه)
+          </div>
+        )}
+
+        {/* Route info overlay on map */}
+        {routeResult && (
+          <div className="absolute top-14 left-1/2 -translate-x-1/2 z-[1000] bg-white/95 dark:bg-gray-900/95 backdrop-blur-sm px-4 py-2.5 rounded-xl shadow-lg border border-blue-200 dark:border-blue-800 flex items-center gap-4 text-xs">
+            <div className="flex items-center gap-1.5">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>
+              <span className="font-bold text-blue-700 dark:text-blue-400">{formatDistance(routeResult.distance)}</span>
+            </div>
+            <div className="w-px h-4 bg-gray-200 dark:bg-gray-700"></div>
+            <div className="flex items-center gap-1.5">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+              <span className="font-bold text-blue-700 dark:text-blue-400">{formatDuration(routeResult.duration)}</span>
+            </div>
+            <div className="w-px h-4 bg-gray-200 dark:bg-gray-700"></div>
+            <span className="text-gray-500">{routingWaypoints.length} توقف</span>
           </div>
         )}
       </div>
