@@ -32,6 +32,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
@@ -57,5 +58,7 @@ server.log
 /db/*.db-journal
 db/*.db
 db/*.db-journal
+/prisma/*.db
+/prisma/*.db-journal
 # Tool results
 tool-results/
