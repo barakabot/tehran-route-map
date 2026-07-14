@@ -59,7 +59,7 @@ function runPrismaDbPush() {
 
   const result = spawnSync(
     process.execPath,
-    [prismaCli, 'db', 'push', '--skip-generate'],
+    [prismaCli, 'db', 'push'],
     {
       cwd: projectRoot,
       env: process.env,
