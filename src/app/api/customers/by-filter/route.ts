@@ -59,7 +59,7 @@ export async function GET(request: Request) {
     // === Route filter (fast, indexed) ===
     if (route) {
       const customers = await db.$queryRawUnsafe(
-        'SELECT id, customerName, sellerName, currentRoute, blockName, routeChange, address, source, lat, lng, isNew FROM Customer WHERE currentRoute = ?',
+        'SELECT id, customerName, sellerName, currentRoute, blockName, routeChange, address, source, lat, lng, isNew, optimizedOrder, optimizedNeighborhood, routeOptimizedAt FROM Customer WHERE currentRoute = ?',
         route
       ) as Array<Record<string, unknown>>;
 
@@ -88,7 +88,7 @@ export async function GET(request: Request) {
     // === Search filter ===
     if (search) {
       const customers = await db.$queryRawUnsafe(
-        'SELECT id, customerName, sellerName, currentRoute, blockName, routeChange, address, source, lat, lng, isNew FROM Customer WHERE customerName LIKE ? OR address LIKE ? OR sellerName LIKE ?',
+        'SELECT id, customerName, sellerName, currentRoute, blockName, routeChange, address, source, lat, lng, isNew, optimizedOrder, optimizedNeighborhood, routeOptimizedAt FROM Customer WHERE customerName LIKE ? OR address LIKE ? OR sellerName LIKE ?',
         `%${search}%`, `%${search}%`, `%${search}%`
       ) as Array<Record<string, unknown>>;
 
@@ -154,7 +154,7 @@ export async function GET(request: Request) {
         const batch = matchingIds.slice(i, i + 200);
         const placeholders = batch.map(() => '?').join(',');
         const rows = await db.$queryRawUnsafe(
-          `SELECT id, customerName, sellerName, currentRoute, blockName, routeChange, address, source, lat, lng, isNew FROM Customer WHERE id IN (${placeholders})`,
+          `SELECT id, customerName, sellerName, currentRoute, blockName, routeChange, address, source, lat, lng, isNew, optimizedOrder, optimizedNeighborhood, routeOptimizedAt FROM Customer WHERE id IN (${placeholders})`,
           ...batch
         ) as Array<Record<string, unknown>>;
         allCustomers.push(...rows);

@@ -20,6 +20,9 @@ model Customer {
   lng          Float
   isNew        Boolean          @default(false)
   routeName    String           @default("")
+  optimizedOrder        Int?
+  optimizedNeighborhood String  @default("")
+  routeOptimizedAt      DateTime?
   createdAt    DateTime         @default(now())
   updatedAt    DateTime         @updatedAt
   reports      CustomerReport[]
@@ -27,6 +30,7 @@ model Customer {
   @@index([currentRoute])
   @@index([lat, lng])
   @@index([customerName])
+  @@index([optimizedNeighborhood, source, optimizedOrder])
 }
 
 model CustomerReport {

@@ -45,6 +45,9 @@ function ensureSqliteDirectory(databaseUrl) {
   }
 
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+  if (!fs.existsSync(databasePath)) {
+    fs.closeSync(fs.openSync(databasePath, 'a'));
+  }
 }
 
 function runPrismaDbPush() {

@@ -961,7 +961,7 @@ export default function InteractiveMap() {
 
   // Build an open-ended route for all visible customers in the selected neighborhood.
   const optimizeNeighborhoodRoute = useCallback(async () => {
-    if (!selectedNeighborhood || displayCustomers.length === 0) return;
+    if (!selectedNeighborhood || !selectedSource || displayCustomers.length === 0) return;
 
     const neighborhoodCustomers = displayCustomers.filter((customer) =>
       Number.isFinite(customer.lat) && Number.isFinite(customer.lng)
@@ -988,8 +988,21 @@ export default function InteractiveMap() {
         ...neighborhoodCustomers.map((customer) => `${customer.lng},${customer.lat}`),
       ];
 
-      let optimizedCustomers = neighborhoodCustomers;
-      if (neighborhoodCustomers.length > 1) {
+      const savedOrders = neighborhoodCustomers
+        .map((customer) => customer.optimizedOrder)
+        .filter((order): order is number => Number.isInteger(order));
+      const hasValidSavedOrder = neighborhoodCustomers.every((customer) =>
+        customer.optimizedNeighborhood === selectedNeighborhood
+        && Number.isInteger(customer.optimizedOrder)
+      ) && [...savedOrders].sort((a, b) => a - b).every((order, index) => order === index + 1);
+
+      let optimizedCustomers = hasValidSavedOrder
+        ? [...neighborhoodCustomers].sort(
+            (first, second) => (first.optimizedOrder || 0) - (second.optimizedOrder || 0)
+          )
+        : neighborhoodCustomers;
+
+      if (!hasValidSavedOrder && neighborhoodCustomers.length > 1) {
         const optimizationResponse = await fetch(
           `/api/osrm/trip?coords=${encodeURIComponent(inputCoords.join(';'))}&destination=any`
         );
@@ -1007,6 +1020,40 @@ export default function InteractiveMap() {
           .filter(Boolean);
       }
 
+      if (!hasValidSavedOrder) {
+        const saveResponse = await fetch('/api/customers/optimized-order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            neighborhood: selectedNeighborhood,
+            source: selectedSource,
+            orderedCustomerIds: optimizedCustomers.map((customer) => customer.id),
+          }),
+        });
+        const saveData = await saveResponse.json();
+        if (!saveResponse.ok || saveData.error) {
+          throw new Error(saveData.error || 'ذخیره ترتیب مشتریان انجام نشد.');
+        }
+
+        const orderById = new Map(
+          optimizedCustomers.map((customer, index) => [customer.id, index + 1])
+        );
+        setCustomers((currentCustomers) => currentCustomers.map((customer) => {
+          const optimizedOrder = orderById.get(customer.id);
+          if (!optimizedOrder) return customer;
+          return {
+            ...customer,
+            optimizedOrder,
+            optimizedNeighborhood: selectedNeighborhood,
+            routeOptimizedAt: saveData.optimizedAt,
+          };
+        }));
+      }
+
+      // Show persisted numbering even if drawing the traffic line fails afterwards.
+      setRoutingMode(true);
+      setRoutingWaypoints(optimizedCustomers);
+
       const finalCoords = [
         `${origin[1]},${origin[0]}`,
         ...optimizedCustomers.map((customer) => `${customer.lng},${customer.lat}`),
@@ -1019,12 +1066,10 @@ export default function InteractiveMap() {
         throw new Error(routeData.error || 'مسیر ترافیکی محله از سرویس راه دریافت نشد.');
       }
 
-      setRoutingMode(true);
-      setRoutingWaypoints(optimizedCustomers);
       setRouteResult(routeData.routes[0] as RouteResult);
       toast({
-        title: `مسیر محله ${selectedNeighborhood} آماده شد`,
-        description: `${optimizedCustomers.length.toLocaleString('fa-IR')} مشتری از موقعیت فعلی شما شماره‌گذاری شدند.`,
+        title: hasValidSavedOrder ? 'ترتیب ذخیره‌شده بارگذاری شد' : `مسیر محله ${selectedNeighborhood} بهینه شد`,
+        description: `${optimizedCustomers.length.toLocaleString('fa-IR')} مشتری سورس ${selectedSource} شماره‌گذاری شدند.`,
       });
     } catch (error) {
       console.error('Neighborhood route optimization failed:', error);
@@ -1041,10 +1086,37 @@ export default function InteractiveMap() {
     displayCustomers,
     getCurrentUserLocation,
     selectedNeighborhood,
+    selectedSource,
     setRouteResult,
     setRoutingLoading,
     setRoutingMode,
     setRoutingWaypoints,
+  ]);
+
+  // A neighborhood route always belongs to exactly one source. Select the first available
+  // source automatically, while preserving the user's source when it exists in the neighborhood.
+  useEffect(() => {
+    if (
+      !selectedNeighborhood
+      || loadedNeighborhood !== selectedNeighborhood
+      || loadingCustomers
+      || customers.length === 0
+    ) return;
+
+    const neighborhoodSources = [...new Set(customers.map((customer) => customer.source))]
+      .filter(Boolean)
+      .sort((first, second) => first.localeCompare(second, 'fa'));
+    if (neighborhoodSources.length > 0 && !neighborhoodSources.includes(selectedSource)) {
+      autoRouteRequestRef.current = '';
+      setSelectedSource(neighborhoodSources[0]);
+    }
+  }, [
+    customers,
+    loadedNeighborhood,
+    loadingCustomers,
+    selectedNeighborhood,
+    selectedSource,
+    setSelectedSource,
   ]);
 
   // Automatically calculate and number the route after the selected neighborhood finishes loading.
@@ -1057,6 +1129,7 @@ export default function InteractiveMap() {
       loadedNeighborhood !== selectedNeighborhood
       || loadingCustomers
       || routingLoading
+      || !selectedSource
       || displayCustomers.length === 0
     ) return;
 
@@ -1573,7 +1646,7 @@ export default function InteractiveMap() {
             onChange={(e) => setSelectedSource(e.target.value || '')}
             className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 min-h-[44px]"
           >
-            <option value="">همه منابع</option>
+            <option value="">{selectedNeighborhood ? 'انتخاب خودکار سورس' : 'همه منابع'}</option>
             {sourceList.map((s) => (
               <option key={s} value={s}>{s} ({(currentSourceCounts[s] || 0).toLocaleString('fa-IR')})</option>
             ))}

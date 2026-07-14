@@ -10,6 +10,9 @@ export interface CustomerPoint {
   lat: number;
   lng: number;
   isNew?: boolean;
+  optimizedOrder?: number | null;
+  optimizedNeighborhood?: string;
+  routeOptimizedAt?: string | null;
 }
 
 export interface DistrictFeature {
