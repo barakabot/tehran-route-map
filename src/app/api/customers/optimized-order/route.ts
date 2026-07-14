@@ -29,6 +29,7 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     const neighborhoodName = typeof body.neighborhood === 'string' ? body.neighborhood.trim() : '';
+    const districtName = typeof body.district === 'string' ? body.district.trim() : '';
     const source = typeof body.source === 'string' ? body.source.trim() : '';
     const orderedCustomerIds = Array.isArray(body.orderedCustomerIds)
       ? body.orderedCustomerIds.filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
@@ -37,11 +38,13 @@ export async function POST(request: Request) {
     if (!neighborhoodName || !source || orderedCustomerIds.length === 0) {
       return NextResponse.json({ error: 'محله، سورس و ترتیب مشتریان الزامی است.' }, { status: 400 });
     }
-    if (orderedCustomerIds.length > 99 || new Set(orderedCustomerIds).size !== orderedCustomerIds.length) {
+    if (orderedCustomerIds.length > 2000 || new Set(orderedCustomerIds).size !== orderedCustomerIds.length) {
       return NextResponse.json({ error: 'ترتیب مشتریان معتبر نیست.' }, { status: 400 });
     }
 
-    const neighborhood = await db.neighborhood.findFirst({ where: { name: neighborhoodName } });
+    const neighborhood = await db.neighborhood.findFirst({
+      where: { name: neighborhoodName, ...(districtName ? { districtName } : {}) },
+    });
     if (!neighborhood) {
       return NextResponse.json({ error: 'محله پیدا نشد.' }, { status: 404 });
     }
@@ -75,10 +78,11 @@ export async function POST(request: Request) {
     const optimizedAt = new Date();
     await db.$transaction(async (transaction) => {
       await transaction.customer.updateMany({
-        where: { optimizedNeighborhood: neighborhoodName, source },
+        where: { optimizedNeighborhoodId: neighborhood.id, source },
         data: {
           optimizedOrder: null,
           optimizedNeighborhood: '',
+          optimizedNeighborhoodId: '',
           routeOptimizedAt: null,
         },
       });
@@ -89,6 +93,7 @@ export async function POST(request: Request) {
           data: {
             optimizedOrder: index + 1,
             optimizedNeighborhood: neighborhoodName,
+            optimizedNeighborhoodId: neighborhood.id,
             routeOptimizedAt: optimizedAt,
           },
         });
@@ -98,6 +103,7 @@ export async function POST(request: Request) {
     return NextResponse.json({
       saved: true,
       neighborhood: neighborhoodName,
+      neighborhoodId: neighborhood.id,
       source,
       customerCount: orderedCustomerIds.length,
       optimizedAt: optimizedAt.toISOString(),

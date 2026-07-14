@@ -33,6 +33,9 @@ export async function GET(request: Request) {
     const district = searchParams.get('district');
     const neighborhood = searchParams.get('neighborhood');
     const search = searchParams.get('search');
+    const neighborhoodWhere = neighborhood
+      ? { name: neighborhood, ...(district ? { districtName: district } : {}) }
+      : null;
 
     // Get total stats using raw SQL (fastest)
     const statsRows = await db.$queryRawUnsafe(
@@ -59,7 +62,7 @@ export async function GET(request: Request) {
     // === Route filter (fast, indexed) ===
     if (route) {
       const customers = await db.$queryRawUnsafe(
-        'SELECT id, customerName, sellerName, currentRoute, blockName, routeChange, address, source, lat, lng, isNew, optimizedOrder, optimizedNeighborhood, routeOptimizedAt FROM Customer WHERE currentRoute = ?',
+        'SELECT id, customerName, sellerName, currentRoute, blockName, routeChange, address, source, lat, lng, isNew, optimizedOrder, optimizedNeighborhood, optimizedNeighborhoodId, routeOptimizedAt FROM Customer WHERE currentRoute = ?',
         route
       ) as Array<Record<string, unknown>>;
 
@@ -72,7 +75,7 @@ export async function GET(request: Request) {
         }
       }
       if (neighborhood) {
-        const neigh = await db.neighborhood.findFirst({ where: { name: neighborhood } });
+        const neigh = await db.neighborhood.findFirst({ where: neighborhoodWhere! });
         if (neigh) {
           const pc = (JSON.parse(neigh.geometry) as GeoJSON.Polygon).coordinates[0];
           filtered = filtered.filter((c) => pointInPolygon(Number(c.lng), Number(c.lat), pc));
@@ -88,7 +91,7 @@ export async function GET(request: Request) {
     // === Search filter ===
     if (search) {
       const customers = await db.$queryRawUnsafe(
-        'SELECT id, customerName, sellerName, currentRoute, blockName, routeChange, address, source, lat, lng, isNew, optimizedOrder, optimizedNeighborhood, routeOptimizedAt FROM Customer WHERE customerName LIKE ? OR address LIKE ? OR sellerName LIKE ?',
+        'SELECT id, customerName, sellerName, currentRoute, blockName, routeChange, address, source, lat, lng, isNew, optimizedOrder, optimizedNeighborhood, optimizedNeighborhoodId, routeOptimizedAt FROM Customer WHERE customerName LIKE ? OR address LIKE ? OR sellerName LIKE ?',
         `%${search}%`, `%${search}%`, `%${search}%`
       ) as Array<Record<string, unknown>>;
 
@@ -101,7 +104,7 @@ export async function GET(request: Request) {
         }
       }
       if (neighborhood) {
-        const neigh = await db.neighborhood.findFirst({ where: { name: neighborhood } });
+        const neigh = await db.neighborhood.findFirst({ where: neighborhoodWhere! });
         if (neigh) {
           const pc = (JSON.parse(neigh.geometry) as GeoJSON.Polygon).coordinates[0];
           filtered = filtered.filter((c) => pointInPolygon(Number(c.lng), Number(c.lat), pc));
@@ -121,7 +124,7 @@ export async function GET(request: Request) {
       if (dist) polyCoords = (JSON.parse(dist.geometry) as GeoJSON.Polygon).coordinates[0];
     }
     if (neighborhood) {
-      const neigh = await db.neighborhood.findFirst({ where: { name: neighborhood } });
+      const neigh = await db.neighborhood.findFirst({ where: neighborhoodWhere! });
       if (neigh) polyCoords = (JSON.parse(neigh.geometry) as GeoJSON.Polygon).coordinates[0];
     }
 
@@ -154,7 +157,7 @@ export async function GET(request: Request) {
         const batch = matchingIds.slice(i, i + 200);
         const placeholders = batch.map(() => '?').join(',');
         const rows = await db.$queryRawUnsafe(
-          `SELECT id, customerName, sellerName, currentRoute, blockName, routeChange, address, source, lat, lng, isNew, optimizedOrder, optimizedNeighborhood, routeOptimizedAt FROM Customer WHERE id IN (${placeholders})`,
+          `SELECT id, customerName, sellerName, currentRoute, blockName, routeChange, address, source, lat, lng, isNew, optimizedOrder, optimizedNeighborhood, optimizedNeighborhoodId, routeOptimizedAt FROM Customer WHERE id IN (${placeholders})`,
           ...batch
         ) as Array<Record<string, unknown>>;
         allCustomers.push(...rows);

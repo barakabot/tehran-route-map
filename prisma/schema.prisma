@@ -8,29 +8,30 @@ datasource db {
 }
 
 model Customer {
-  id           String           @id @default(cuid())
-  customerName String
-  sellerName   String           @default("")
-  currentRoute String           @default("")
-  blockName    String           @default("")
-  routeChange  String           @default("")
-  address      String           @default("")
-  source       String           @default("ورانگر")
-  lat          Float
-  lng          Float
-  isNew        Boolean          @default(false)
-  routeName    String           @default("")
-  optimizedOrder        Int?
-  optimizedNeighborhood String  @default("")
-  routeOptimizedAt      DateTime?
-  createdAt    DateTime         @default(now())
-  updatedAt    DateTime         @updatedAt
-  reports      CustomerReport[]
+  id                      String           @id @default(cuid())
+  customerName            String
+  sellerName              String           @default("")
+  currentRoute            String           @default("")
+  blockName               String           @default("")
+  routeChange             String           @default("")
+  address                 String           @default("")
+  source                  String           @default("ورانگر")
+  lat                     Float
+  lng                     Float
+  isNew                   Boolean          @default(false)
+  routeName               String           @default("")
+  optimizedOrder          Int?
+  optimizedNeighborhood   String           @default("")
+  optimizedNeighborhoodId String           @default("")
+  routeOptimizedAt        DateTime?
+  createdAt               DateTime         @default(now())
+  updatedAt               DateTime         @updatedAt
+  reports                 CustomerReport[]
 
   @@index([currentRoute])
   @@index([lat, lng])
   @@index([customerName])
-  @@index([optimizedNeighborhood, source, optimizedOrder])
+  @@index([optimizedNeighborhoodId, source, optimizedOrder])
 }
 
 model CustomerReport {

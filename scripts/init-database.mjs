@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { optimizeCustomerOrders } from './optimize-customer-orders.mjs';
 
 const projectRoot = process.cwd();
 
@@ -194,6 +195,7 @@ async function main() {
   const prisma = new PrismaClient();
   try {
     await seedEmptyTables(prisma);
+    await optimizeCustomerOrders(prisma);
   } finally {
     await prisma.$disconnect();
   }

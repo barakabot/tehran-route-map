@@ -56,6 +56,57 @@ function buildBaladNavigationUrl(origin: UserLatLng, destination: CustomerPoint)
   return `https://balad.ir/directions/driving?origin=${encodeURIComponent(originValue)}&destination=${encodeURIComponent(destinationValue)}`;
 }
 
+function geographicCustomerOrder(customers: CustomerPoint[], origin: UserLatLng): CustomerPoint[] {
+  const remaining = [...customers];
+  const ordered: CustomerPoint[] = [];
+  let current = { lat: origin[0], lng: origin[1] };
+
+  while (remaining.length > 0) {
+    let nearestIndex = 0;
+    let nearestDistance = Infinity;
+    for (let index = 0; index < remaining.length; index++) {
+      const averageLatitude = ((current.lat + remaining[index].lat) / 2) * Math.PI / 180;
+      const lngDistance = (current.lng - remaining[index].lng) * Math.cos(averageLatitude);
+      const latDistance = current.lat - remaining[index].lat;
+      const distance = lngDistance * lngDistance + latDistance * latDistance;
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = index;
+      }
+    }
+    const [nearest] = remaining.splice(nearestIndex, 1);
+    ordered.push(nearest);
+    current = nearest;
+  }
+
+  return ordered;
+}
+
+async function fetchTrafficRoute(coordinatePoints: string[]): Promise<RouteResult> {
+  let distance = 0;
+  let duration = 0;
+  const coordinates: GeoJSON.Position[] = [];
+  const legs: RouteResult['legs'] = [];
+
+  for (let start = 0; start < coordinatePoints.length - 1; start += 99) {
+    const chunk = coordinatePoints.slice(start, start + 100);
+    const response = await fetch(`/api/raah/route?coords=${encodeURIComponent(chunk.join(';'))}`);
+    const data = await response.json();
+    if (!response.ok || data.error || !data.routes?.[0]) {
+      throw new Error(data.error || 'مسیر ترافیکی محله از سرویس راه دریافت نشد.');
+    }
+
+    const route = data.routes[0] as RouteResult;
+    distance += route.distance;
+    duration += route.duration;
+    legs.push(...route.legs);
+    const segmentCoordinates = route.geometry.coordinates;
+    coordinates.push(...(coordinates.length > 0 ? segmentCoordinates.slice(1) : segmentCoordinates));
+  }
+
+  return { distance, duration, geometry: { type: 'LineString', coordinates }, legs };
+}
+
 export default function InteractiveMap() {
   const mapRef = useRef<unknown>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -89,9 +140,9 @@ export default function InteractiveMap() {
   const [batchText, setBatchText] = useState('');
   const [batchSource, setBatchSource] = useState('ورانگر');
   const [districts, setDistricts] = useState<Array<{ name: string; district_number: number; geometry: Record<string, unknown> }>>([]);
-  const [neighborhoods, setNeighborhoods] = useState<Array<{ name: string; district_name: string; geometry: Record<string, unknown> }>>([]);
+  const [neighborhoods, setNeighborhoods] = useState<Array<{ id: string; name: string; district_name: string; geometry: Record<string, unknown> }>>([]);
   const [districtNames, setDistrictNames] = useState<Array<{ name: string; district_number: number }>>([]);
-  const [neighborhoodNames, setNeighborhoodNames] = useState<Array<{ name: string; district_name: string; district_number: number }>>([]);
+  const [neighborhoodNames, setNeighborhoodNames] = useState<Array<{ id: string; name: string; district_name: string; district_number: number }>>([]);
   const [routeNames, setRouteNames] = useState<string[]>([]);
   const [routeBlocks, setRouteBlocks] = useState<RouteBlock[]>([]);
   const [showSidebar, setShowSidebar] = useState(
@@ -310,15 +361,15 @@ export default function InteractiveMap() {
 
     neighborhoods.forEach((n) => {
       const nColor = neighborhoodColorMap.get(n.district_name) || '#818cf8';
+      const isSelected = selectedNeighborhood === n.name && selectedDistrict === n.district_name;
       const geojson = L.geoJSON(n.geometry as GeoJSON.GeometryObject, {
         style: {
           color: nColor,
-          weight: 1.5,
           fillColor: nColor,
-          fillOpacity: selectedNeighborhood === n.name ? 0.45 : 0.15,
-          opacity: selectedNeighborhood === n.name ? 1 : 0.9,
-          weight: selectedNeighborhood === n.name ? 3 : 2.5,
-          dashArray: selectedNeighborhood === n.name ? '' : '4, 4',
+          fillOpacity: isSelected ? 0.45 : 0.15,
+          opacity: isSelected ? 1 : 0.9,
+          weight: isSelected ? 3 : 2.5,
+          dashArray: isSelected ? '' : '4, 4',
         },
       });
 
@@ -326,7 +377,12 @@ export default function InteractiveMap() {
         const l = layer as L.Polygon;
         l.bindTooltip(n.name, { sticky: true, direction: 'top' });
         l.on('click', () => {
-          setSelectedNeighborhood(selectedNeighborhood === n.name ? '' : n.name);
+          if (isSelected) {
+            setSelectedNeighborhood('');
+          } else {
+            setSelectedDistrict(n.district_name);
+            setSelectedNeighborhood(n.name);
+          }
         });
         if (editMode === 'editPolygon') {
           l.pm?.enable({ allowSelfIntersection: false });
@@ -335,7 +391,15 @@ export default function InteractiveMap() {
 
       nl.addLayer(geojson);
     });
-  }, [neighborhoods, layers.neighborhoods, editMode, selectedNeighborhood, setSelectedNeighborhood]);
+  }, [
+    neighborhoods,
+    layers.neighborhoods,
+    editMode,
+    selectedDistrict,
+    selectedNeighborhood,
+    setSelectedDistrict,
+    setSelectedNeighborhood,
+  ]);
 
   // Render route block polygons (from database - real polygons)
   useEffect(() => {
@@ -397,6 +461,10 @@ export default function InteractiveMap() {
   const displayCustomers = selectedSource
     ? customers.filter((c) => c.source === selectedSource)
     : customers;
+  const selectedNeighborhoodId = neighborhoodNames.find(
+    (neighborhood) => neighborhood.name === selectedNeighborhood
+      && neighborhood.district_name === selectedDistrict
+  )?.id || '';
 
   // Render customer points
   useEffect(() => {
@@ -967,15 +1035,6 @@ export default function InteractiveMap() {
       Number.isFinite(customer.lat) && Number.isFinite(customer.lng)
     );
     if (neighborhoodCustomers.length === 0) return;
-    if (neighborhoodCustomers.length > 99) {
-      toast({
-        variant: 'destructive',
-        title: 'تعداد مشتریان زیاد است',
-        description: 'برای یک مسیر حداکثر ۹۹ مشتری پشتیبانی می‌شود. لطفاً با فیلتر منبع، مسیر را کوچک‌تر کنید.',
-      });
-      return;
-    }
-
     setRoutingLoading(true);
     setRoutingAction('neighborhood');
     setOptimizationSummary(null);
@@ -992,7 +1051,7 @@ export default function InteractiveMap() {
         .map((customer) => customer.optimizedOrder)
         .filter((order): order is number => Number.isInteger(order));
       const hasValidSavedOrder = neighborhoodCustomers.every((customer) =>
-        customer.optimizedNeighborhood === selectedNeighborhood
+        customer.optimizedNeighborhoodId === selectedNeighborhoodId
         && Number.isInteger(customer.optimizedOrder)
       ) && [...savedOrders].sort((a, b) => a - b).every((order, index) => order === index + 1);
 
@@ -1002,7 +1061,9 @@ export default function InteractiveMap() {
           )
         : neighborhoodCustomers;
 
-      if (!hasValidSavedOrder && neighborhoodCustomers.length > 1) {
+      if (!hasValidSavedOrder && neighborhoodCustomers.length > 99) {
+        optimizedCustomers = geographicCustomerOrder(neighborhoodCustomers, origin);
+      } else if (!hasValidSavedOrder && neighborhoodCustomers.length > 1) {
         const optimizationResponse = await fetch(
           `/api/osrm/trip?coords=${encodeURIComponent(inputCoords.join(';'))}&destination=any`
         );
@@ -1026,6 +1087,7 @@ export default function InteractiveMap() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             neighborhood: selectedNeighborhood,
+            district: selectedDistrict,
             source: selectedSource,
             orderedCustomerIds: optimizedCustomers.map((customer) => customer.id),
           }),
@@ -1045,6 +1107,7 @@ export default function InteractiveMap() {
             ...customer,
             optimizedOrder,
             optimizedNeighborhood: selectedNeighborhood,
+            optimizedNeighborhoodId: saveData.neighborhoodId,
             routeOptimizedAt: saveData.optimizedAt,
           };
         }));
@@ -1054,19 +1117,12 @@ export default function InteractiveMap() {
       setRoutingMode(true);
       setRoutingWaypoints(optimizedCustomers);
 
-      const finalCoords = [
+      const finalCoordinates = [
         `${origin[1]},${origin[0]}`,
         ...optimizedCustomers.map((customer) => `${customer.lng},${customer.lat}`),
-      ].join(';');
-      const routeResponse = await fetch(
-        `/api/raah/route?coords=${encodeURIComponent(finalCoords)}`
-      );
-      const routeData = await routeResponse.json();
-      if (!routeResponse.ok || routeData.error) {
-        throw new Error(routeData.error || 'مسیر ترافیکی محله از سرویس راه دریافت نشد.');
-      }
+      ];
 
-      setRouteResult(routeData.routes[0] as RouteResult);
+      setRouteResult(await fetchTrafficRoute(finalCoordinates));
       toast({
         title: hasValidSavedOrder ? 'ترتیب ذخیره‌شده بارگذاری شد' : `مسیر محله ${selectedNeighborhood} بهینه شد`,
         description: `${optimizedCustomers.length.toLocaleString('fa-IR')} مشتری سورس ${selectedSource} شماره‌گذاری شدند.`,
@@ -1086,6 +1142,8 @@ export default function InteractiveMap() {
     displayCustomers,
     getCurrentUserLocation,
     selectedNeighborhood,
+    selectedNeighborhoodId,
+    selectedDistrict,
     selectedSource,
     setRouteResult,
     setRoutingLoading,
@@ -1575,6 +1633,11 @@ export default function InteractiveMap() {
             value={selectedDistrict}
             onChange={(e) => {
               const val = e.target.value;
+              autoRouteRequestRef.current = '';
+              clearRoutingWaypoints();
+              setRouteResult(null);
+              setOptimizationSummary(null);
+              setSelectedNeighborhood('');
               setSelectedDistrict(val || '');
               if (val) flyToDistrict(val);
             }}

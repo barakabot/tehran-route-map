@@ -16,6 +16,7 @@ export async function GET(request: Request) {
   });
 
   const result = neighborhoods.map((n) => ({
+    id: n.id,
     name: n.name,
     district_number: n.districtNumber,
     district_name: n.districtName,
@@ -23,6 +24,7 @@ export async function GET(request: Request) {
   }));
 
   const names = neighborhoods.map((n) => ({
+    id: n.id,
     name: n.name,
     district_name: n.districtName,
     district_number: n.districtNumber,

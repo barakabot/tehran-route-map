@@ -12,6 +12,7 @@ export interface CustomerPoint {
   isNew?: boolean;
   optimizedOrder?: number | null;
   optimizedNeighborhood?: string;
+  optimizedNeighborhoodId?: string;
   routeOptimizedAt?: string | null;
 }
 
