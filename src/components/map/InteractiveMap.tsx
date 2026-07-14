@@ -14,6 +14,14 @@ const DISTRICT_COLORS = [
   '#e6194b', '#3cb44b',
 ];
 
+const SOURCE_ROUTE_COLORS = ['#2563eb', '#ea580c', '#16a34a', '#9333ea', '#db2777', '#0891b2'];
+
+function getSourceRouteColor(source: string): string {
+  if (!source) return SOURCE_ROUTE_COLORS[0];
+  const hash = [...source].reduce((value, character) => value + character.charCodeAt(0), 0);
+  return SOURCE_ROUTE_COLORS[hash % SOURCE_ROUTE_COLORS.length];
+}
+
 // Calculate bearing between two points for arrow rotation
 function bearing(from: [number, number], to: [number, number]): number {
   const dLng = ((to[1] - from[1]) * Math.PI) / 180;
@@ -54,6 +62,11 @@ function buildBaladNavigationUrl(origin: UserLatLng, destination: CustomerPoint)
   const originValue = `${origin[1]},${origin[0]}`;
   const destinationValue = `${destination.lng},${destination.lat}`;
   return `https://balad.ir/directions/driving?origin=${encodeURIComponent(originValue)}&destination=${encodeURIComponent(destinationValue)}`;
+}
+
+interface SourceRouteResult {
+  source: string;
+  result: RouteResult;
 }
 
 function geographicCustomerOrder(customers: CustomerPoint[], origin: UserLatLng): CustomerPoint[] {
@@ -136,6 +149,7 @@ export default function InteractiveMap() {
   const [reportError, setReportError] = useState('');
   const [routingAction, setRoutingAction] = useState<'calculate' | 'optimize' | 'neighborhood' | null>(null);
   const [optimizationSummary, setOptimizationSummary] = useState<OptimizationSummary | null>(null);
+  const [neighborhoodRouteResults, setNeighborhoodRouteResults] = useState<SourceRouteResult[]>([]);
   const [batchDialog, setBatchDialog] = useState(false);
   const [batchText, setBatchText] = useState('');
   const [batchSource, setBatchSource] = useState('ورانگر');
@@ -160,7 +174,7 @@ export default function InteractiveMap() {
     selectedDistrict, selectedNeighborhood, selectedRoute,
     setSelectedDistrict, setSelectedNeighborhood, setSelectedRoute,
     searchQuery, setSearchQuery,
-    selectedSource, setSelectedSource,
+    selectedSources, setSelectedSources,
     routingMode, setRoutingMode,
     routingWaypoints, addRoutingWaypoint, removeRoutingWaypoint, clearRoutingWaypoints, setRoutingWaypoints,
     routeResult, setRouteResult, routingLoading, setRoutingLoading,
@@ -458,8 +472,8 @@ export default function InteractiveMap() {
   }, [routeBlocks, layers.routes, editMode, setSelectedRoute]);
 
   // Client-side source filter (applied on already-fetched customers)
-  const displayCustomers = selectedSource
-    ? customers.filter((c) => c.source === selectedSource)
+  const displayCustomers = selectedSources.length > 0
+    ? customers.filter((c) => selectedSources.includes(c.source))
     : customers;
   const selectedNeighborhoodId = neighborhoodNames.find(
     (neighborhood) => neighborhood.name === selectedNeighborhood
@@ -564,21 +578,35 @@ export default function InteractiveMap() {
     wml.clearLayers();
     if (!routingMode) return;
 
+    const waypointSources = [...new Set(routingWaypoints.map((waypoint) => waypoint.customer.source))];
+    const isMultiSource = waypointSources.length > 1;
+    const sourceTotals = new Map(
+      waypointSources.map((source) => [
+        source,
+        routingWaypoints.filter((waypoint) => waypoint.customer.source === source).length,
+      ])
+    );
+    const sourceCounters = new Map<string, number>();
+
     routingWaypoints.forEach((wp, idx) => {
-      const isStart = idx === 0;
-      const isEnd = idx === routingWaypoints.length - 1 && routingWaypoints.length > 1;
+      const fallbackOrder = (sourceCounters.get(wp.customer.source) || 0) + 1;
+      sourceCounters.set(wp.customer.source, fallbackOrder);
+      const displayOrder = isMultiSource ? (wp.customer.optimizedOrder || fallbackOrder) : idx + 1;
+      const isStart = displayOrder === 1;
+      const isEnd = displayOrder === sourceTotals.get(wp.customer.source) && displayOrder > 1;
+      const sourceColor = getSourceRouteColor(wp.customer.source);
 
       const markerIcon = L.divIcon({
         html: `<div style="
           width:${isStart || isEnd ? 28 : 24}px;
           height:${isStart || isEnd ? 28 : 24}px;
-          background:${isStart ? '#10b981' : isEnd ? '#ef4444' : '#f59e0b'};
+          background:${isStart || isEnd ? sourceColor : `${sourceColor}dd`};
           border:3px solid white;
           border-radius:50%;
           box-shadow:0 2px 8px rgba(0,0,0,0.3);
           display:flex;align-items:center;justify-content:center;
           color:white;font-size:${isStart || isEnd ? 13 : 11}px;font-weight:bold;
-        ">${idx + 1}</div>`,
+        ">${displayOrder}</div>`,
         className: '',
         iconSize: [isStart || isEnd ? 28 : 24, isStart || isEnd ? 28 : 24],
         iconAnchor: [isStart || isEnd ? 14 : 12, isStart || isEnd ? 14 : 12],
@@ -588,7 +616,7 @@ export default function InteractiveMap() {
       marker.bindTooltip(
         `<div style="direction:rtl;text-align:right;font-size:12px;">
           <strong>${wp.customer.customerName}</strong><br/>
-          <span style="color:#666;">ایستگاه ${idx + 1}</span>
+          <span style="color:#666;">سورس ${wp.customer.source} — ایستگاه ${displayOrder}</span>
         </div>`,
         { sticky: true, direction: 'top', className: 'custom-tooltip' }
       );
@@ -602,54 +630,62 @@ export default function InteractiveMap() {
     if (!L || !routingLayerRef.current) return;
     const rl = routingLayerRef.current as ReturnType<typeof L.layerGroup>;
     rl.clearLayers();
-    if (!routeResult) return;
+    const routesToDraw = neighborhoodRouteResults.length > 0
+      ? neighborhoodRouteResults
+      : routeResult
+        ? [{ source: '', result: routeResult }]
+        : [];
+    if (routesToDraw.length === 0) return;
 
-    const coords = routeResult.geometry.coordinates.map(
-      (c: number[]) => [c[1], c[0]] as [number, number]
-    );
-
-    // Draw the main route line with an animated dashed background
-    const bgLine = L.polyline(coords, {
-      color: '#1e40af',
-      weight: 8,
-      opacity: 0.2,
-      lineCap: 'round',
-      lineJoin: 'round',
-    });
-    rl.addLayer(bgLine);
-
-    const mainLine = L.polyline(coords, {
-      color: '#3b82f6',
-      weight: 5,
-      opacity: 0.9,
-      lineCap: 'round',
-      lineJoin: 'round',
-      dashArray: '12, 8',
-    });
-    rl.addLayer(mainLine);
-
-    // Add direction arrows along the route
-    for (let i = 0; i < coords.length - 1; i += Math.max(1, Math.floor(coords.length / 15))) {
-      const arrowIcon = L.divIcon({
-        html: `<div style="color:#1e40af;font-size:14px;transform:rotate(${bearing(coords[i], coords[Math.min(i + 1, coords.length - 1)])}deg);line-height:1;">▲</div>`,
-        className: '',
-        iconSize: [14, 14],
-        iconAnchor: [7, 7],
+    let combinedBounds: ReturnType<typeof L.latLngBounds> | null = null;
+    routesToDraw.forEach(({ source, result }, routeIndex) => {
+      const coords = result.geometry.coordinates.map(
+        (coordinate: GeoJSON.Position) => [coordinate[1], coordinate[0]] as [number, number]
+      );
+      if (coords.length < 2) return;
+      const color = source ? getSourceRouteColor(source) : SOURCE_ROUTE_COLORS[routeIndex % SOURCE_ROUTE_COLORS.length];
+      const bgLine = L.polyline(coords, {
+        color,
+        weight: 8,
+        opacity: 0.18,
+        lineCap: 'round',
+        lineJoin: 'round',
       });
-      const arrow = L.marker(coords[i], { icon: arrowIcon, interactive: false });
-      rl.addLayer(arrow);
-    }
+      const mainLine = L.polyline(coords, {
+        color,
+        weight: 5,
+        opacity: 0.9,
+        lineCap: 'round',
+        lineJoin: 'round',
+        dashArray: routeIndex % 2 === 0 ? '12, 8' : '5, 7',
+      });
+      rl.addLayer(bgLine);
+      rl.addLayer(mainLine);
+      combinedBounds = combinedBounds
+        ? combinedBounds.extend(mainLine.getBounds())
+        : mainLine.getBounds();
 
-    // Fit map to route bounds
+      for (let index = 0; index < coords.length - 1; index += Math.max(1, Math.floor(coords.length / 12))) {
+        const arrowIcon = L.divIcon({
+          html: `<div style="color:${color};font-size:14px;transform:rotate(${bearing(coords[index], coords[Math.min(index + 1, coords.length - 1)])}deg);line-height:1;">▲</div>`,
+          className: '',
+          iconSize: [14, 14],
+          iconAnchor: [7, 7],
+        });
+        rl.addLayer(L.marker(coords[index], { icon: arrowIcon, interactive: false }));
+      }
+    });
+
     const map = mapRef.current as ReturnType<typeof L.map> | null;
-    if (map) {
-      map.fitBounds(mainLine.getBounds(), { padding: [60, 60], duration: 1 });
+    if (map && combinedBounds) {
+      map.fitBounds(combinedBounds, { padding: [60, 60], duration: 1 });
     }
-  }, [routeResult]);
+  }, [neighborhoodRouteResults, routeResult]);
 
   // Clear routing layers when exiting routing mode
   useEffect(() => {
     if (!routingMode) {
+      setNeighborhoodRouteResults([]);
       const L = leafletRef.current;
       if (L && routingLayerRef.current) {
         (routingLayerRef.current as ReturnType<typeof L.layerGroup>).clearLayers();
@@ -700,13 +736,18 @@ export default function InteractiveMap() {
     setIsExporting(true);
     try {
       const XLSX = await import('xlsx');
+      const routedSources = new Set(routingWaypoints.map((waypoint) => waypoint.customer.source));
       const routeOrder = new Map(
-        routingWaypoints.map((waypoint, index) => [waypoint.customer.id, index + 1])
+        routingWaypoints.map((waypoint, index) => [
+          waypoint.customer.id,
+          routedSources.size > 1 ? (waypoint.customer.optimizedOrder || index + 1) : index + 1,
+        ])
       );
       const exportCustomers = routingWaypoints.length > 0
         ? [...displayCustomers].sort((a, b) =>
-            (routeOrder.get(a.id) || Number.MAX_SAFE_INTEGER)
-            - (routeOrder.get(b.id) || Number.MAX_SAFE_INTEGER)
+            (routedSources.size > 1 ? a.source.localeCompare(b.source, 'fa') : 0)
+            || (routeOrder.get(a.id) || Number.MAX_SAFE_INTEGER)
+              - (routeOrder.get(b.id) || Number.MAX_SAFE_INTEGER)
           )
         : displayCustomers;
       const data = exportCustomers.map((c) => ({
@@ -918,6 +959,7 @@ export default function InteractiveMap() {
     setRoutingLoading(true);
     setRoutingAction('calculate');
     setOptimizationSummary(null);
+    setNeighborhoodRouteResults([]);
     setRouteResult(null);
     try {
       const coords = routingWaypoints
@@ -955,6 +997,7 @@ export default function InteractiveMap() {
     setRoutingLoading(true);
     setRoutingAction('optimize');
     setOptimizationSummary(null);
+    setNeighborhoodRouteResults([]);
 
     try {
       const coords = routingWaypoints
@@ -1027,105 +1070,138 @@ export default function InteractiveMap() {
     }
   }, [routingWaypoints, setRouteResult, setRoutingLoading, setRoutingWaypoints]);
 
-  // Build an open-ended route for all visible customers in the selected neighborhood.
+  // Build independent open-ended routes for every selected source in the neighborhood.
   const optimizeNeighborhoodRoute = useCallback(async () => {
-    if (!selectedNeighborhood || !selectedSource || displayCustomers.length === 0) return;
+    if (!selectedNeighborhood || displayCustomers.length === 0) return;
 
     const neighborhoodCustomers = displayCustomers.filter((customer) =>
       Number.isFinite(customer.lat) && Number.isFinite(customer.lng)
     );
     if (neighborhoodCustomers.length === 0) return;
+    const activeSources = [...new Set(neighborhoodCustomers.map((customer) => customer.source))]
+      .filter(Boolean)
+      .sort((first, second) => first.localeCompare(second, 'fa'));
+    if (activeSources.length === 0) return;
+
     setRoutingLoading(true);
     setRoutingAction('neighborhood');
     setOptimizationSummary(null);
+    setNeighborhoodRouteResults([]);
     setRouteResult(null);
 
     try {
       const origin = await getCurrentUserLocation();
-      const inputCoords = [
-        `${origin[1]},${origin[0]}`,
-        ...neighborhoodCustomers.map((customer) => `${customer.lng},${customer.lat}`),
-      ];
+      const allOptimizedCustomers: CustomerPoint[] = [];
+      const customerUpdates = new Map<string, CustomerPoint>();
+      const sourceRoutes: SourceRouteResult[] = [];
+      const routeFailures: string[] = [];
+      let newlyOptimizedSources = 0;
 
-      const savedOrders = neighborhoodCustomers
-        .map((customer) => customer.optimizedOrder)
-        .filter((order): order is number => Number.isInteger(order));
-      const hasValidSavedOrder = neighborhoodCustomers.every((customer) =>
-        customer.optimizedNeighborhoodId === selectedNeighborhoodId
-        && Number.isInteger(customer.optimizedOrder)
-      ) && [...savedOrders].sort((a, b) => a - b).every((order, index) => order === index + 1);
+      for (const source of activeSources) {
+        const sourceCustomers = neighborhoodCustomers.filter((customer) => customer.source === source);
+        const savedOrders = sourceCustomers
+          .map((customer) => customer.optimizedOrder)
+          .filter((order): order is number => Number.isInteger(order));
+        const hasValidSavedOrder = sourceCustomers.every((customer) =>
+          customer.optimizedNeighborhoodId === selectedNeighborhoodId
+          && Number.isInteger(customer.optimizedOrder)
+        ) && [...savedOrders].sort((first, second) => first - second)
+          .every((order, index) => order === index + 1);
 
-      let optimizedCustomers = hasValidSavedOrder
-        ? [...neighborhoodCustomers].sort(
-            (first, second) => (first.optimizedOrder || 0) - (second.optimizedOrder || 0)
-          )
-        : neighborhoodCustomers;
+        let optimizedCustomers = hasValidSavedOrder
+          ? [...sourceCustomers].sort(
+              (first, second) => (first.optimizedOrder || 0) - (second.optimizedOrder || 0)
+            )
+          : sourceCustomers;
 
-      if (!hasValidSavedOrder && neighborhoodCustomers.length > 99) {
-        optimizedCustomers = geographicCustomerOrder(neighborhoodCustomers, origin);
-      } else if (!hasValidSavedOrder && neighborhoodCustomers.length > 1) {
-        const optimizationResponse = await fetch(
-          `/api/osrm/trip?coords=${encodeURIComponent(inputCoords.join(';'))}&destination=any`
-        );
-        const optimizationData = await optimizationResponse.json();
-        if (!optimizationResponse.ok || optimizationData.error) {
-          throw new Error(optimizationData.error || 'ترتیب سریع مشتریان محله پیدا نشد.');
-        }
-        if (!Array.isArray(optimizationData.order) || optimizationData.order.length !== inputCoords.length) {
-          throw new Error('ترتیب پیشنهادی سرویس معتبر نیست.');
-        }
-
-        optimizedCustomers = optimizationData.order
-          .filter((inputIndex: number) => inputIndex !== 0)
-          .map((inputIndex: number) => neighborhoodCustomers[inputIndex - 1])
-          .filter(Boolean);
-      }
-
-      if (!hasValidSavedOrder) {
-        const saveResponse = await fetch('/api/customers/optimized-order', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            neighborhood: selectedNeighborhood,
-            district: selectedDistrict,
-            source: selectedSource,
-            orderedCustomerIds: optimizedCustomers.map((customer) => customer.id),
-          }),
-        });
-        const saveData = await saveResponse.json();
-        if (!saveResponse.ok || saveData.error) {
-          throw new Error(saveData.error || 'ذخیره ترتیب مشتریان انجام نشد.');
+        if (!hasValidSavedOrder && sourceCustomers.length > 99) {
+          optimizedCustomers = geographicCustomerOrder(sourceCustomers, origin);
+        } else if (!hasValidSavedOrder && sourceCustomers.length > 1) {
+          const inputCoordinates = [
+            `${origin[1]},${origin[0]}`,
+            ...sourceCustomers.map((customer) => `${customer.lng},${customer.lat}`),
+          ];
+          const optimizationResponse = await fetch(
+            `/api/osrm/trip?coords=${encodeURIComponent(inputCoordinates.join(';'))}&destination=any`
+          );
+          const optimizationData = await optimizationResponse.json();
+          if (!optimizationResponse.ok || optimizationData.error) {
+            throw new Error(`${source}: ${optimizationData.error || 'ترتیب سریع مشتریان پیدا نشد.'}`);
+          }
+          if (
+            !Array.isArray(optimizationData.order)
+            || optimizationData.order.length !== inputCoordinates.length
+          ) {
+            throw new Error(`${source}: ترتیب پیشنهادی سرویس معتبر نیست.`);
+          }
+          optimizedCustomers = optimizationData.order
+            .filter((inputIndex: number) => inputIndex !== 0)
+            .map((inputIndex: number) => sourceCustomers[inputIndex - 1])
+            .filter(Boolean);
         }
 
-        const orderById = new Map(
-          optimizedCustomers.map((customer, index) => [customer.id, index + 1])
-        );
-        setCustomers((currentCustomers) => currentCustomers.map((customer) => {
-          const optimizedOrder = orderById.get(customer.id);
-          if (!optimizedOrder) return customer;
-          return {
+        if (!hasValidSavedOrder) {
+          const saveResponse = await fetch('/api/customers/optimized-order', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              neighborhood: selectedNeighborhood,
+              district: selectedDistrict,
+              source,
+              orderedCustomerIds: optimizedCustomers.map((customer) => customer.id),
+            }),
+          });
+          const saveData = await saveResponse.json();
+          if (!saveResponse.ok || saveData.error) {
+            throw new Error(`${source}: ${saveData.error || 'ذخیره ترتیب مشتریان انجام نشد.'}`);
+          }
+          optimizedCustomers = optimizedCustomers.map((customer, index) => ({
             ...customer,
-            optimizedOrder,
+            optimizedOrder: index + 1,
             optimizedNeighborhood: selectedNeighborhood,
             optimizedNeighborhoodId: saveData.neighborhoodId,
             routeOptimizedAt: saveData.optimizedAt,
-          };
-        }));
+          }));
+          optimizedCustomers.forEach((customer) => customerUpdates.set(customer.id, customer));
+          newlyOptimizedSources += 1;
+        }
+
+        allOptimizedCustomers.push(...optimizedCustomers);
+        try {
+          const result = await fetchTrafficRoute([
+            `${origin[1]},${origin[0]}`,
+            ...optimizedCustomers.map((customer) => `${customer.lng},${customer.lat}`),
+          ]);
+          sourceRoutes.push({ source, result });
+        } catch (error) {
+          console.error(`Traffic route failed for source ${source}:`, error);
+          routeFailures.push(source);
+        }
       }
 
-      // Show persisted numbering even if drawing the traffic line fails afterwards.
+      if (customerUpdates.size > 0) {
+        setCustomers((currentCustomers) => currentCustomers.map(
+          (customer) => customerUpdates.get(customer.id) || customer
+        ));
+      }
+
       setRoutingMode(true);
-      setRoutingWaypoints(optimizedCustomers);
+      setRoutingWaypoints(allOptimizedCustomers);
+      setNeighborhoodRouteResults(sourceRoutes);
+      if (sourceRoutes.length > 0) {
+        setRouteResult({
+          distance: sourceRoutes.reduce((sum, route) => sum + route.result.distance, 0),
+          duration: sourceRoutes.reduce((sum, route) => sum + route.result.duration, 0),
+          geometry: sourceRoutes[0].result.geometry,
+          legs: sourceRoutes.flatMap((route) => route.result.legs),
+        });
+      }
 
-      const finalCoordinates = [
-        `${origin[1]},${origin[0]}`,
-        ...optimizedCustomers.map((customer) => `${customer.lng},${customer.lat}`),
-      ];
-
-      setRouteResult(await fetchTrafficRoute(finalCoordinates));
       toast({
-        title: hasValidSavedOrder ? 'ترتیب ذخیره‌شده بارگذاری شد' : `مسیر محله ${selectedNeighborhood} بهینه شد`,
-        description: `${optimizedCustomers.length.toLocaleString('fa-IR')} مشتری سورس ${selectedSource} شماره‌گذاری شدند.`,
+        title: newlyOptimizedSources > 0
+          ? `مسیرهای محله ${selectedNeighborhood} بهینه شدند`
+          : 'ترتیب‌های ذخیره‌شده بارگذاری شدند',
+        description: `${allOptimizedCustomers.length.toLocaleString('fa-IR')} مشتری در ${activeSources.length.toLocaleString('fa-IR')} سورس جداگانه شماره‌گذاری شدند.${routeFailures.length > 0 ? ` خط مسیر ${routeFailures.join('، ')} نمایش داده نشد.` : ''}`,
       });
     } catch (error) {
       console.error('Neighborhood route optimization failed:', error);
@@ -1144,37 +1220,10 @@ export default function InteractiveMap() {
     selectedNeighborhood,
     selectedNeighborhoodId,
     selectedDistrict,
-    selectedSource,
     setRouteResult,
     setRoutingLoading,
     setRoutingMode,
     setRoutingWaypoints,
-  ]);
-
-  // A neighborhood route always belongs to exactly one source. Select the first available
-  // source automatically, while preserving the user's source when it exists in the neighborhood.
-  useEffect(() => {
-    if (
-      !selectedNeighborhood
-      || loadedNeighborhood !== selectedNeighborhood
-      || loadingCustomers
-      || customers.length === 0
-    ) return;
-
-    const neighborhoodSources = [...new Set(customers.map((customer) => customer.source))]
-      .filter(Boolean)
-      .sort((first, second) => first.localeCompare(second, 'fa'));
-    if (neighborhoodSources.length > 0 && !neighborhoodSources.includes(selectedSource)) {
-      autoRouteRequestRef.current = '';
-      setSelectedSource(neighborhoodSources[0]);
-    }
-  }, [
-    customers,
-    loadedNeighborhood,
-    loadingCustomers,
-    selectedNeighborhood,
-    selectedSource,
-    setSelectedSource,
   ]);
 
   // Automatically calculate and number the route after the selected neighborhood finishes loading.
@@ -1187,11 +1236,10 @@ export default function InteractiveMap() {
       loadedNeighborhood !== selectedNeighborhood
       || loadingCustomers
       || routingLoading
-      || !selectedSource
       || displayCustomers.length === 0
     ) return;
 
-    const routeKey = `${selectedNeighborhood}|${selectedSource}|${displayCustomers
+    const routeKey = `${selectedNeighborhood}|${[...selectedSources].sort().join(',') || 'all'}|${displayCustomers
       .map((customer) => customer.id)
       .sort()
       .join(',')}`;
@@ -1206,7 +1254,7 @@ export default function InteractiveMap() {
     optimizeNeighborhoodRoute,
     routingLoading,
     selectedNeighborhood,
-    selectedSource,
+    selectedSources,
   ]);
 
   // Format distance/duration helpers
@@ -1237,7 +1285,7 @@ export default function InteractiveMap() {
   const isFiltered = selectedDistrict || selectedNeighborhood || selectedRoute || searchQuery;
   const currentSourceCounts = isFiltered && stats.filteredSourceCounts ? stats.filteredSourceCounts : stats.sourceCounts;
   const currentCount = displayCustomers.length;
-  const hasFilter = selectedDistrict || selectedNeighborhood || selectedRoute || selectedSource || searchQuery;
+  const hasFilter = selectedDistrict || selectedNeighborhood || selectedRoute || selectedSources.length > 0 || searchQuery;
 
   // Source list for dropdown (from stats)
   const sourceList = Object.keys(stats.sourceCounts);
@@ -1547,6 +1595,7 @@ export default function InteractiveMap() {
                 <button
                   onClick={() => {
                     clearRoutingWaypoints();
+                    setNeighborhoodRouteResults([]);
                     setRouteResult(null);
                     setOptimizationSummary(null);
                   }}
@@ -1635,6 +1684,7 @@ export default function InteractiveMap() {
               const val = e.target.value;
               autoRouteRequestRef.current = '';
               clearRoutingWaypoints();
+              setNeighborhoodRouteResults([]);
               setRouteResult(null);
               setOptimizationSummary(null);
               setSelectedNeighborhood('');
@@ -1656,6 +1706,7 @@ export default function InteractiveMap() {
                 onChange={(e) => {
                   autoRouteRequestRef.current = '';
                   clearRoutingWaypoints();
+                  setNeighborhoodRouteResults([]);
                   setRouteResult(null);
                   setOptimizationSummary(null);
                   setSelectedNeighborhood(e.target.value || '');
@@ -1703,17 +1754,62 @@ export default function InteractiveMap() {
 
         {/* Filter by Source */}
         <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
-          <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">فیلتر بر اساس منبع</h3>
-          <select
-            value={selectedSource}
-            onChange={(e) => setSelectedSource(e.target.value || '')}
-            className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 min-h-[44px]"
-          >
-            <option value="">{selectedNeighborhood ? 'انتخاب خودکار سورس' : 'همه منابع'}</option>
-            {sourceList.map((s) => (
-              <option key={s} value={s}>{s} ({(currentSourceCounts[s] || 0).toLocaleString('fa-IR')})</option>
-            ))}
-          </select>
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">فیلتر چند سورس هم‌زمان</h3>
+            <button
+              type="button"
+              onClick={() => {
+                autoRouteRequestRef.current = '';
+                clearRoutingWaypoints();
+                setNeighborhoodRouteResults([]);
+                setRouteResult(null);
+                setSelectedSources([]);
+              }}
+              className={`text-[10px] px-2 py-1 rounded-md transition-colors ${selectedSources.length === 0 ? 'bg-emerald-600 text-white' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'}`}
+            >
+              همه سورس‌ها
+            </button>
+          </div>
+          <div className="grid grid-cols-1 gap-1.5">
+            {sourceList.map((source) => {
+              const checked = selectedSources.length === 0 || selectedSources.includes(source);
+              return (
+                <label
+                  key={source}
+                  className={`flex items-center justify-between gap-2 px-3 py-2 rounded-lg border cursor-pointer min-h-[42px] transition-colors ${checked ? 'border-emerald-400 bg-emerald-50 dark:bg-emerald-950/30' : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800'}`}
+                >
+                  <span className="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => {
+                        const nextSources = selectedSources.length === 0
+                          ? sourceList.filter((item) => item !== source)
+                          : selectedSources.includes(source)
+                            ? selectedSources.filter((item) => item !== source)
+                            : [...selectedSources, source];
+                        if (nextSources.length === 0) return;
+                        autoRouteRequestRef.current = '';
+                        clearRoutingWaypoints();
+                        setNeighborhoodRouteResults([]);
+                        setRouteResult(null);
+                        setSelectedSources(nextSources.length === sourceList.length ? [] : nextSources);
+                      }}
+                      className="h-4 w-4 accent-emerald-600"
+                    />
+                    <span
+                      className="h-2.5 w-2.5 rounded-full"
+                      style={{ backgroundColor: getSourceRouteColor(source) }}
+                    />
+                    {source}
+                  </span>
+                  <span className="text-[10px] text-gray-500">
+                    {(currentSourceCounts[source] || 0).toLocaleString('fa-IR')}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
         </div>
 
         {/* Active Filters */}
@@ -1730,7 +1826,18 @@ export default function InteractiveMap() {
                   <span>نمایش: {currentCount.toLocaleString('fa-IR')} مشتری</span>
                 )}
               </span>
-              <button onClick={clearFilter} className="text-xs text-red-500 hover:text-red-700 active:text-red-800 min-h-[44px] px-3 flex items-center transition-colors">پاک‌سازی</button>
+              <button
+                onClick={() => {
+                  autoRouteRequestRef.current = '';
+                  clearRoutingWaypoints();
+                  setNeighborhoodRouteResults([]);
+                  setRouteResult(null);
+                  clearFilter();
+                }}
+                className="text-xs text-red-500 hover:text-red-700 active:bg-red-50 active:text-red-800 min-h-[44px] px-3 flex items-center transition-colors"
+              >
+                پاک‌سازی
+              </button>
             </div>
           </div>
         )}

@@ -72,8 +72,8 @@ interface MapStore {
   setSearchQuery: (q: string) => void;
 
   // Source filter
-  selectedSource: string;
-  setSelectedSource: (s: string) => void;
+  selectedSources: string[];
+  setSelectedSources: (sources: string[]) => void;
 
   // Routing
   routingMode: boolean;
@@ -139,7 +139,7 @@ export const useMapStore = create<MapStore>((set) => ({
       selectedDistrict: '',
       selectedNeighborhood: '',
       selectedRoute: '',
-      selectedSource: '',
+      selectedSources: [],
     }),
 
   userLocation: null,
@@ -155,8 +155,8 @@ export const useMapStore = create<MapStore>((set) => ({
   searchQuery: '',
   setSearchQuery: (q) => set({ searchQuery: q }),
 
-  selectedSource: '',
-  setSelectedSource: (s) => set({ selectedSource: s }),
+  selectedSources: [],
+  setSelectedSources: (sources) => set({ selectedSources: [...new Set(sources)] }),
 
   // Routing
   routingMode: false,
