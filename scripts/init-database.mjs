@@ -73,6 +73,28 @@ function runPrismaDbPush() {
   }
 }
 
+function runPrismaGenerate() {
+  const prismaCli = path.join(projectRoot, 'node_modules', 'prisma', 'build', 'index.js');
+  if (!fs.existsSync(prismaCli)) {
+    throw new Error('Prisma CLI is not installed. Run npm install first.');
+  }
+
+  const result = spawnSync(
+    process.execPath,
+    [prismaCli, 'generate'],
+    {
+      cwd: projectRoot,
+      env: process.env,
+      stdio: 'inherit',
+    }
+  );
+
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`prisma generate failed with exit code ${result.status}`);
+  }
+}
+
 function readFeatures(fileName) {
   const filePath = path.join(projectRoot, 'upload', fileName);
   if (!fs.existsSync(filePath)) {
@@ -190,6 +212,7 @@ async function main() {
   process.env.DATABASE_URL ||= 'file:./custom.db';
   ensureSqliteDirectory(process.env.DATABASE_URL);
   runPrismaDbPush();
+  runPrismaGenerate();
 
   const { PrismaClient } = await import('@prisma/client');
   const prisma = new PrismaClient();
