@@ -8,45 +8,59 @@ datasource db {
 }
 
 model Customer {
-  id           String  @id @default(cuid())
+  id           String           @id @default(cuid())
   customerName String
-  sellerName   String  @default("")
-  currentRoute String  @default("")
-  blockName    String  @default("")
-  routeChange  String  @default("")
-  address      String  @default("")
-  source       String  @default("ورانگر")
+  sellerName   String           @default("")
+  currentRoute String           @default("")
+  blockName    String           @default("")
+  routeChange  String           @default("")
+  address      String           @default("")
+  source       String           @default("ورانگر")
   lat          Float
   lng          Float
-  isNew        Boolean @default(false)
-  routeName    String  @default("")
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  isNew        Boolean          @default(false)
+  routeName    String           @default("")
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  reports      CustomerReport[]
 
   @@index([currentRoute])
   @@index([lat, lng])
   @@index([customerName])
 }
 
+model CustomerReport {
+  id           String    @id @default(cuid())
+  customerId   String
+  visitStatus  String
+  description  String
+  followUpDate DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  customer     Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, createdAt])
+}
+
 model Route {
-  id                String   @id @default(cuid())
-  name              String   @unique
-  color             String   @default("")
-  geometry          String   @default("")  // JSON string of GeoJSON Polygon
-  customerCount     Int      @default(0)
-  coreCustomerCount Int      @default(0)
-  outlierCount      Int      @default(0)
-  salesOffice       String   @default("")
-  distributionCenter String  @default("")
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  id                 String   @id @default(cuid())
+  name               String   @unique
+  color              String   @default("")
+  geometry           String   @default("") // JSON string of GeoJSON Polygon
+  customerCount      Int      @default(0)
+  coreCustomerCount  Int      @default(0)
+  outlierCount       Int      @default(0)
+  salesOffice        String   @default("")
+  distributionCenter String   @default("")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 }
 
 model District {
-  id             String  @id @default(cuid())
+  id             String   @id @default(cuid())
   name           String
   districtNumber Int
-  geometry       String  // JSON string of GeoJSON Polygon
+  geometry       String // JSON string of GeoJSON Polygon
   areaKm2        Float?
   population     Int?
   location       String?
@@ -56,11 +70,11 @@ model District {
 }
 
 model Neighborhood {
-  id             String  @id @default(cuid())
+  id             String   @id @default(cuid())
   name           String
   districtName   String
   districtNumber Int
-  geometry       String  // JSON string of GeoJSON Polygon
+  geometry       String // JSON string of GeoJSON Polygon
   areaKm2        Float?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt

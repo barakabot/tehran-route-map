@@ -82,6 +82,7 @@ interface MapStore {
   addRoutingWaypoint: (customer: CustomerPoint) => void;
   removeRoutingWaypoint: (customerId: string) => void;
   clearRoutingWaypoints: () => void;
+  setRoutingWaypoints: (customers: CustomerPoint[]) => void;
   reorderRoutingWaypoints: (fromIndex: number, toIndex: number) => void;
   routeResult: RouteResult | null;
   setRouteResult: (r: RouteResult | null) => void;
@@ -164,9 +165,15 @@ export const useMapStore = create<MapStore>((set) => ({
   addRoutingWaypoint: (customer) =>
     set((state) => {
       if (state.routingWaypoints.some((w) => w.customer.id === customer.id)) {
-        return { routingWaypoints: state.routingWaypoints.filter((w) => w.customer.id !== customer.id) };
+        return {
+          routingWaypoints: state.routingWaypoints.filter((w) => w.customer.id !== customer.id),
+          routeResult: null,
+        };
       }
-      return { routingWaypoints: [...state.routingWaypoints, { customer, order: state.routingWaypoints.length }] };
+      return {
+        routingWaypoints: [...state.routingWaypoints, { customer, order: state.routingWaypoints.length }],
+        routeResult: null,
+      };
     }),
   removeRoutingWaypoint: (customerId) =>
     set((state) => ({
@@ -174,6 +181,11 @@ export const useMapStore = create<MapStore>((set) => ({
       routeResult: null,
     })),
   clearRoutingWaypoints: () => set({ routingWaypoints: [], routeResult: null }),
+  setRoutingWaypoints: (customers) =>
+    set({
+      routingWaypoints: customers.map((customer, order) => ({ customer, order })),
+      routeResult: null,
+    }),
   reorderRoutingWaypoints: (fromIndex, toIndex) =>
     set((state) => {
       const wp = [...state.routingWaypoints];

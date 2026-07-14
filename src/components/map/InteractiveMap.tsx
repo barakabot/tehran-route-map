@@ -3,6 +3,7 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { useMapStore, type RouteResult } from '@/lib/store';
 import type { CustomerPoint } from '@/lib/types';
+import { toast } from '@/hooks/use-toast';
 
 // Color palette for districts
 const DISTRICT_COLORS = [
@@ -41,6 +42,12 @@ interface SourceStats {
   filteredSourceCounts?: Record<string, number>;
 }
 
+interface OptimizationSummary {
+  savedDistance: number;
+  savedDuration: number;
+  changedStops: number;
+}
+
 export default function InteractiveMap() {
   const mapRef = useRef<unknown>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -59,6 +66,14 @@ export default function InteractiveMap() {
   const [customers, setCustomers] = useState<CustomerPoint[]>([]);
   const [stats, setStats] = useState<SourceStats>({ total: 0, sourceCounts: {} });
   const [editDialog, setEditDialog] = useState<{ open: boolean; customer: CustomerPoint | null; lat: number; lng: number }>({ open: false, customer: null, lat: 0, lng: 0 });
+  const [reportDialog, setReportDialog] = useState<{ open: boolean; customer: CustomerPoint | null }>({ open: false, customer: null });
+  const [reportStatus, setReportStatus] = useState('');
+  const [reportDescription, setReportDescription] = useState('');
+  const [reportFollowUpDate, setReportFollowUpDate] = useState('');
+  const [reportSubmitting, setReportSubmitting] = useState(false);
+  const [reportError, setReportError] = useState('');
+  const [routingAction, setRoutingAction] = useState<'calculate' | 'optimize' | null>(null);
+  const [optimizationSummary, setOptimizationSummary] = useState<OptimizationSummary | null>(null);
   const [batchDialog, setBatchDialog] = useState(false);
   const [batchText, setBatchText] = useState('');
   const [batchSource, setBatchSource] = useState('ورانگر');
@@ -85,7 +100,7 @@ export default function InteractiveMap() {
     searchQuery, setSearchQuery,
     selectedSource, setSelectedSource,
     routingMode, setRoutingMode,
-    routingWaypoints, addRoutingWaypoint, removeRoutingWaypoint, clearRoutingWaypoints,
+    routingWaypoints, addRoutingWaypoint, removeRoutingWaypoint, clearRoutingWaypoints, setRoutingWaypoints,
     routeResult, setRouteResult, routingLoading, setRoutingLoading,
   } = useMapStore();
 
@@ -407,13 +422,19 @@ export default function InteractiveMap() {
         className: 'custom-tooltip',
       });
 
-      marker.on('click', () => {
+      marker.on('click', (event: { originalEvent: MouseEvent }) => {
+        L.DomEvent.stopPropagation(event.originalEvent);
         if (routingMode) {
+          setOptimizationSummary(null);
           addRoutingWaypoint(customer);
           return;
         }
         setSelectedCustomer(customer);
-        setEditDialog({ open: true, customer, lat: customer.lat, lng: customer.lng });
+        setReportStatus('');
+        setReportDescription('');
+        setReportFollowUpDate('');
+        setReportError('');
+        setReportDialog({ open: true, customer });
       });
 
       // Drag to edit point position
@@ -691,6 +712,50 @@ export default function InteractiveMap() {
     }
   }, [editDialog.customer, removeCustomer]);
 
+  // Save a visit report for the selected customer
+  const handleSubmitReport = useCallback(async () => {
+    const customer = reportDialog.customer;
+    if (!customer || reportSubmitting) return;
+
+    if (!reportStatus || !reportDescription.trim()) {
+      setReportError('نتیجه مراجعه و توضیحات گزارش را وارد کنید.');
+      return;
+    }
+
+    setReportSubmitting(true);
+    setReportError('');
+
+    try {
+      const response = await fetch(`/api/customers/${encodeURIComponent(customer.id)}/reports`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          visitStatus: reportStatus,
+          description: reportDescription,
+          followUpDate: reportFollowUpDate || null,
+        }),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'ثبت گزارش انجام نشد.');
+      }
+
+      setReportDialog({ open: false, customer: null });
+      setReportStatus('');
+      setReportDescription('');
+      setReportFollowUpDate('');
+      toast({
+        title: 'گزارش ثبت شد',
+        description: `گزارش مراجعه ${customer.customerName} با موفقیت ذخیره شد.`,
+      });
+    } catch (error) {
+      setReportError(error instanceof Error ? error.message : 'ثبت گزارش انجام نشد.');
+    } finally {
+      setReportSubmitting(false);
+    }
+  }, [reportDialog.customer, reportStatus, reportDescription, reportFollowUpDate, reportSubmitting]);
+
   // Go to user location
   const goToUserLocation = useCallback(() => {
     const L = leafletRef.current;
@@ -710,6 +775,8 @@ export default function InteractiveMap() {
   const calculateRoute = useCallback(async () => {
     if (routingWaypoints.length < 2) return;
     setRoutingLoading(true);
+    setRoutingAction('calculate');
+    setOptimizationSummary(null);
     setRouteResult(null);
     try {
       const coords = routingWaypoints
@@ -718,9 +785,7 @@ export default function InteractiveMap() {
       const res = await fetch(`/api/osrm/route?coords=${coords}`);
       const data = await res.json();
       if (data.error) {
-        console.error('Routing error:', data.error);
-        setRoutingLoading(false);
-        return;
+        throw new Error(data.error);
       }
       const route = data.routes[0];
       setRouteResult({
@@ -731,9 +796,84 @@ export default function InteractiveMap() {
       });
     } catch (err) {
       console.error('Routing failed:', err);
+      toast({
+        variant: 'destructive',
+        title: 'مسیریابی انجام نشد',
+        description: err instanceof Error ? err.message : 'ارتباط با سرویس مسیریابی برقرار نشد.',
+      });
+    } finally {
+      setRoutingLoading(false);
+      setRoutingAction(null);
     }
-    setRoutingLoading(false);
   }, [routingWaypoints, setRouteResult, setRoutingLoading]);
+
+  // Optimize middle stops while keeping the first and last stops fixed
+  const optimizeRoute = useCallback(async () => {
+    if (routingWaypoints.length < 4) return;
+
+    setRoutingLoading(true);
+    setRoutingAction('optimize');
+    setOptimizationSummary(null);
+
+    try {
+      const coords = routingWaypoints
+        .map((waypoint) => `${waypoint.customer.lng},${waypoint.customer.lat}`)
+        .join(';');
+
+      const [currentResponse, optimizedResponse] = await Promise.all([
+        fetch(`/api/osrm/route?coords=${coords}`),
+        fetch(`/api/osrm/trip?coords=${coords}`),
+      ]);
+      const [currentData, optimizedData] = await Promise.all([
+        currentResponse.json(),
+        optimizedResponse.json(),
+      ]);
+
+      if (!currentResponse.ok || currentData.error) {
+        throw new Error(currentData.error || 'محاسبه مسیر فعلی انجام نشد.');
+      }
+      if (!optimizedResponse.ok || optimizedData.error) {
+        throw new Error(optimizedData.error || 'بهینه‌سازی ترتیب انجام نشد.');
+      }
+      if (!Array.isArray(optimizedData.order) || optimizedData.order.length !== routingWaypoints.length) {
+        throw new Error('ترتیب پیشنهادی سرویس معتبر نیست.');
+      }
+
+      const originalRoute = currentData.routes[0] as RouteResult;
+      const optimizedRouteResult = optimizedData.route as RouteResult;
+      const optimizedCustomers = optimizedData.order.map(
+        (inputIndex: number) => routingWaypoints[inputIndex].customer
+      );
+      const changedStops = optimizedData.order.filter(
+        (inputIndex: number, optimizedIndex: number) => inputIndex !== optimizedIndex
+      ).length;
+
+      setRoutingWaypoints(optimizedCustomers);
+      setRouteResult(optimizedRouteResult);
+      setOptimizationSummary({
+        savedDistance: originalRoute.distance - optimizedRouteResult.distance,
+        savedDuration: originalRoute.duration - optimizedRouteResult.duration,
+        changedStops,
+      });
+
+      toast({
+        title: 'ترتیب مسیر بهینه شد',
+        description: changedStops > 0
+          ? `جای ${changedStops.toLocaleString('fa-IR')} توقف تغییر کرد.`
+          : 'ترتیب فعلی از قبل مناسب بود.',
+      });
+    } catch (error) {
+      console.error('Route optimization failed:', error);
+      toast({
+        variant: 'destructive',
+        title: 'بهینه‌سازی انجام نشد',
+        description: error instanceof Error ? error.message : 'ارتباط با سرویس بهینه‌سازی برقرار نشد.',
+      });
+    } finally {
+      setRoutingLoading(false);
+      setRoutingAction(null);
+    }
+  }, [routingWaypoints, setRouteResult, setRoutingLoading, setRoutingWaypoints]);
 
   // Format distance/duration helpers
   const formatDistance = (m: number) => {
@@ -974,6 +1114,7 @@ export default function InteractiveMap() {
             </button>
             <button
               onClick={() => {
+                setOptimizationSummary(null);
                 if (routingMode) {
                   setRoutingMode(false);
                 } else {
@@ -1020,7 +1161,10 @@ export default function InteractiveMap() {
                     </span>
                     {idx > 0 && (
                       <button
-                        onClick={() => removeRoutingWaypoint(wp.customer.id)}
+                        onClick={() => {
+                          setOptimizationSummary(null);
+                          removeRoutingWaypoint(wp.customer.id);
+                        }}
                         className="text-red-400 hover:text-red-600 active:text-red-800 min-w-[32px] min-h-[32px] flex items-center justify-center transition-colors"
                         aria-label="حذف"
                       >
@@ -1033,31 +1177,71 @@ export default function InteractiveMap() {
             )}
 
             {/* Route action buttons */}
-            <div className="flex gap-2">
+            <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={calculateRoute}
                 disabled={routingWaypoints.length < 2 || routingLoading}
                 className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white text-xs rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5 min-h-[44px] font-medium"
               >
-                {routingLoading ? (
+                {routingAction === 'calculate' ? (
                   <><span className="animate-spin inline-block">⟳</span> در حال مسیریابی...</>
                 ) : (
-                  <>🚗 محاسبه مسیر ({routingWaypoints.length} نقطه)</>
+                  <>🚗 محاسبه مسیر</>
+                )}
+              </button>
+              <button
+                onClick={optimizeRoute}
+                disabled={routingWaypoints.length < 4 || routingLoading}
+                className="py-2.5 bg-violet-600 hover:bg-violet-700 active:bg-violet-800 text-white text-xs rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5 min-h-[44px] font-medium"
+                title={routingWaypoints.length < 4 ? 'برای بهینه‌سازی حداقل ۴ مشتری انتخاب کنید' : 'بهینه‌سازی ترتیب توقف‌های میانی'}
+              >
+                {routingAction === 'optimize' ? (
+                  <><span className="animate-spin inline-block">⟳</span> در حال بهینه‌سازی...</>
+                ) : (
+                  <>✨ بهینه‌سازی ترتیب</>
                 )}
               </button>
               {(routingWaypoints.length > 0 || routeResult) && (
                 <button
-                  onClick={() => { clearRoutingWaypoints(); setRouteResult(null); }}
-                  className="py-2.5 px-3 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 text-xs rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 active:bg-gray-100 dark:active:bg-gray-700 transition-colors min-h-[44px]"
+                  onClick={() => {
+                    clearRoutingWaypoints();
+                    setRouteResult(null);
+                    setOptimizationSummary(null);
+                  }}
+                  className="col-span-2 py-2.5 px-3 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 text-xs rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 active:bg-gray-100 dark:active:bg-gray-700 transition-colors min-h-[44px]"
                 >
                   پاک‌سازی
                 </button>
               )}
             </div>
 
+            {routingWaypoints.length > 0 && (
+              <p className="mt-2 text-[10px] leading-4 text-blue-500 dark:text-blue-400">
+                در بهینه‌سازی، مشتری اول و آخر ثابت می‌مانند و ترتیب توقف‌های میانی تغییر می‌کند. حداقل ۴ مشتری لازم است.
+              </p>
+            )}
+
             {/* Route result */}
             {routeResult && (
               <div className="mt-3 bg-white dark:bg-gray-800 rounded-lg p-2.5 border border-blue-100 dark:border-blue-900 space-y-1.5">
+                {optimizationSummary && (
+                  <div className="mb-2 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 p-2 border border-emerald-100 dark:border-emerald-900">
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <span className="font-semibold text-emerald-700 dark:text-emerald-400">نتیجه بهینه‌سازی</span>
+                      <span className="text-emerald-600 dark:text-emerald-400">
+                        {optimizationSummary.changedStops.toLocaleString('fa-IR')} توقف جابه‌جا شد
+                      </span>
+                    </div>
+                    <div className="mt-1.5 grid grid-cols-2 gap-1 text-[10px]">
+                      <span className={optimizationSummary.savedDistance >= 0 ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-700 dark:text-amber-400'}>
+                        {formatDistance(Math.abs(optimizationSummary.savedDistance))} {optimizationSummary.savedDistance >= 0 ? 'مسافت کمتر' : 'مسافت بیشتر'}
+                      </span>
+                      <span className={optimizationSummary.savedDuration >= 0 ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-700 dark:text-amber-400'}>
+                        {formatDuration(Math.abs(optimizationSummary.savedDuration))} {optimizationSummary.savedDuration >= 0 ? 'زمان کمتر' : 'زمان بیشتر'}
+                      </span>
+                    </div>
+                  </div>
+                )}
                 <div className="flex items-center justify-between">
                   <span className="text-xs text-gray-500">مسافت کل</span>
                   <span className="text-sm font-bold text-blue-700 dark:text-blue-400">{formatDistance(routeResult.distance)}</span>
@@ -1307,6 +1491,135 @@ export default function InteractiveMap() {
           </div>
         )}
       </div>
+
+      {/* Customer Report Dialog */}
+      {reportDialog.open && reportDialog.customer && (
+        <div
+          className="fixed inset-0 z-[1001] flex items-end lg:items-center justify-center bg-black/50 p-0 lg:p-4 safe-area-bottom"
+          onClick={() => {
+            if (!reportSubmitting) setReportDialog({ open: false, customer: null });
+          }}
+        >
+          <div
+            className="bg-white dark:bg-gray-900 rounded-t-2xl lg:rounded-xl shadow-2xl w-full lg:max-w-md max-h-[90vh] overflow-y-auto p-5 pb-8 lg:p-6 lg:pb-6"
+            dir="rtl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex justify-center mb-3 lg:hidden">
+              <div className="w-10 h-1 bg-gray-300 dark:bg-gray-600 rounded-full" />
+            </div>
+
+            <div className="flex items-start justify-between gap-3 mb-4">
+              <div>
+                <h2 className="text-lg font-bold text-gray-800 dark:text-gray-100">ثبت گزارش مشتری</h2>
+                <p className="text-sm font-medium text-blue-700 dark:text-blue-400 mt-1">
+                  {reportDialog.customer.customerName}
+                </p>
+              </div>
+              <span className="text-2xl" aria-hidden="true">📝</span>
+            </div>
+
+            <div className="mb-4 rounded-xl bg-blue-50 dark:bg-blue-950/30 p-3 text-xs text-gray-600 dark:text-gray-300 space-y-1">
+              {reportDialog.customer.currentRoute && (
+                <p><span className="text-gray-500">مسیر:</span> {reportDialog.customer.currentRoute}</p>
+              )}
+              {reportDialog.customer.address && (
+                <p className="leading-5"><span className="text-gray-500">آدرس:</span> {reportDialog.customer.address}</p>
+              )}
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label htmlFor="report-status" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  نتیجه مراجعه *
+                </label>
+                <select
+                  id="report-status"
+                  value={reportStatus}
+                  onChange={(event) => {
+                    setReportStatus(event.target.value);
+                    setReportError('');
+                  }}
+                  className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 min-h-[44px]"
+                >
+                  <option value="">انتخاب نتیجه مراجعه</option>
+                  <option value="سفارش ثبت شد">سفارش ثبت شد</option>
+                  <option value="مراجعه انجام شد">مراجعه انجام شد</option>
+                  <option value="نیاز به پیگیری">نیاز به پیگیری</option>
+                  <option value="مشتری حضور نداشت">مشتری حضور نداشت</option>
+                  <option value="عدم تمایل مشتری">عدم تمایل مشتری</option>
+                </select>
+              </div>
+
+              <div>
+                <label htmlFor="report-description" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  توضیحات گزارش *
+                </label>
+                <textarea
+                  id="report-description"
+                  value={reportDescription}
+                  onChange={(event) => {
+                    setReportDescription(event.target.value);
+                    setReportError('');
+                  }}
+                  rows={4}
+                  className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 resize-none min-h-[112px]"
+                  placeholder="شرح مراجعه، درخواست مشتری یا اقدام انجام‌شده را بنویسید..."
+                />
+              </div>
+
+              <div>
+                <label htmlFor="report-follow-up-date" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  تاریخ پیگیری بعدی (اختیاری)
+                </label>
+                <input
+                  id="report-follow-up-date"
+                  type="date"
+                  value={reportFollowUpDate}
+                  onChange={(event) => setReportFollowUpDate(event.target.value)}
+                  className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 min-h-[44px]"
+                  dir="ltr"
+                />
+              </div>
+            </div>
+
+            {reportError && (
+              <div className="mt-3 rounded-lg bg-red-50 dark:bg-red-950/30 px-3 py-2 text-xs text-red-700 dark:text-red-400" role="alert">
+                {reportError}
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-2 mt-5">
+              <button
+                onClick={handleSubmitReport}
+                disabled={reportSubmitting}
+                className="col-span-2 py-2.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white text-sm rounded-lg transition-colors min-h-[44px] font-medium disabled:opacity-60"
+              >
+                {reportSubmitting ? 'در حال ثبت گزارش...' : 'ثبت گزارش'}
+              </button>
+              <button
+                onClick={() => {
+                  const customer = reportDialog.customer;
+                  if (!customer) return;
+                  setReportDialog({ open: false, customer: null });
+                  setEditDialog({ open: true, customer, lat: customer.lat, lng: customer.lng });
+                }}
+                disabled={reportSubmitting}
+                className="py-2.5 px-4 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400 text-sm rounded-lg hover:bg-blue-50 dark:hover:bg-blue-950/30 transition-colors min-h-[44px] disabled:opacity-60"
+              >
+                ویرایش مشتری
+              </button>
+              <button
+                onClick={() => setReportDialog({ open: false, customer: null })}
+                disabled={reportSubmitting}
+                className="py-2.5 px-4 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 text-sm rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors min-h-[44px] disabled:opacity-60"
+              >
+                انصراف
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Add/Edit Customer Dialog */}
       {editDialog.open && (
