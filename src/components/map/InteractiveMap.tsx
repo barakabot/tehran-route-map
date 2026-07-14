@@ -67,10 +67,13 @@ export default function InteractiveMap() {
   const routingLayerRef = useRef<unknown>(null);
   const waypointMarkerLayerRef = useRef<unknown>(null);
   const leafletRef = useRef<typeof import('leaflet') | null>(null);
+  const customerRequestIdRef = useRef(0);
+  const autoRouteRequestRef = useRef('');
 
   const [isExporting, setIsExporting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingCustomers, setLoadingCustomers] = useState(false);
+  const [loadedNeighborhood, setLoadedNeighborhood] = useState('');
   const [customers, setCustomers] = useState<CustomerPoint[]>([]);
   const [stats, setStats] = useState<SourceStats>({ total: 0, sourceCounts: {} });
   const [editDialog, setEditDialog] = useState<{ open: boolean; customer: CustomerPoint | null; lat: number; lng: number }>({ open: false, customer: null, lat: 0, lng: 0 });
@@ -213,7 +216,9 @@ export default function InteractiveMap() {
 
   // Fetch filtered customers from server when filter changes
   const fetchFilteredCustomers = useCallback(async () => {
+    const requestId = ++customerRequestIdRef.current;
     setLoadingCustomers(true);
+    setLoadedNeighborhood('');
     try {
       const params = new URLSearchParams();
       if (selectedRoute) params.set('route', selectedRoute);
@@ -223,18 +228,25 @@ export default function InteractiveMap() {
 
       const res = await fetch(`/api/customers/by-filter?${params.toString()}`);
       const data = await res.json();
+      if (requestId !== customerRequestIdRef.current) return;
 
       setCustomers(data.customers || []);
+      setLoadedNeighborhood(selectedNeighborhood);
       setStats({
         total: data.total,
         sourceCounts: data.sourceCounts || {},
         filteredSourceCounts: data.filteredSourceCounts,
       });
     } catch (err) {
+      if (requestId !== customerRequestIdRef.current) return;
       console.error('Failed to fetch customers:', err);
       setCustomers([]);
+      setLoadedNeighborhood('');
+    } finally {
+      if (requestId === customerRequestIdRef.current) {
+        setLoadingCustomers(false);
+      }
     }
-    setLoadingCustomers(false);
   }, [selectedRoute, selectedDistrict, selectedNeighborhood, searchQuery]);
 
   // Trigger customer fetch when filter changes
@@ -1035,6 +1047,37 @@ export default function InteractiveMap() {
     setRoutingWaypoints,
   ]);
 
+  // Automatically calculate and number the route after the selected neighborhood finishes loading.
+  useEffect(() => {
+    if (!selectedNeighborhood) {
+      autoRouteRequestRef.current = '';
+      return;
+    }
+    if (
+      loadedNeighborhood !== selectedNeighborhood
+      || loadingCustomers
+      || routingLoading
+      || displayCustomers.length === 0
+    ) return;
+
+    const routeKey = `${selectedNeighborhood}|${selectedSource}|${displayCustomers
+      .map((customer) => customer.id)
+      .sort()
+      .join(',')}`;
+    if (autoRouteRequestRef.current === routeKey) return;
+
+    autoRouteRequestRef.current = routeKey;
+    void optimizeNeighborhoodRoute();
+  }, [
+    displayCustomers,
+    loadedNeighborhood,
+    loadingCustomers,
+    optimizeNeighborhoodRoute,
+    routingLoading,
+    selectedNeighborhood,
+    selectedSource,
+  ]);
+
   // Format distance/duration helpers
   const formatDistance = (m: number) => {
     if (m >= 1000) return `${(m / 1000).toFixed(1)} km`;
@@ -1474,7 +1517,13 @@ export default function InteractiveMap() {
             <>
               <select
                 value={selectedNeighborhood}
-                onChange={(e) => setSelectedNeighborhood(e.target.value || '')}
+                onChange={(e) => {
+                  autoRouteRequestRef.current = '';
+                  clearRoutingWaypoints();
+                  setRouteResult(null);
+                  setOptimizationSummary(null);
+                  setSelectedNeighborhood(e.target.value || '');
+                }}
                 className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 min-h-[44px]"
               >
                 <option value="">همه محله‌ها</option>
@@ -1493,7 +1542,7 @@ export default function InteractiveMap() {
                   {routingAction === 'neighborhood' ? (
                     <><span className="animate-spin inline-block">⟳</span> در حال ساخت مسیر محله...</>
                   ) : (
-                    <>🚀 سریع‌ترین مسیر این محله ({displayCustomers.length.toLocaleString('fa-IR')} مشتری)</>
+                    <>↻ محاسبه مجدد مسیر ({displayCustomers.length.toLocaleString('fa-IR')} مشتری)</>
                   )}
                 </button>
               )}
