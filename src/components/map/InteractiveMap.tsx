@@ -48,6 +48,14 @@ interface OptimizationSummary {
   changedStops: number;
 }
 
+type UserLatLng = [number, number];
+
+function buildBaladNavigationUrl(origin: UserLatLng, destination: CustomerPoint): string {
+  const originValue = `${origin[1]},${origin[0]}`;
+  const destinationValue = `${destination.lng},${destination.lat}`;
+  return `https://balad.ir/directions/driving?origin=${encodeURIComponent(originValue)}&destination=${encodeURIComponent(destinationValue)}`;
+}
+
 export default function InteractiveMap() {
   const mapRef = useRef<unknown>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -72,7 +80,7 @@ export default function InteractiveMap() {
   const [reportFollowUpDate, setReportFollowUpDate] = useState('');
   const [reportSubmitting, setReportSubmitting] = useState(false);
   const [reportError, setReportError] = useState('');
-  const [routingAction, setRoutingAction] = useState<'calculate' | 'optimize' | null>(null);
+  const [routingAction, setRoutingAction] = useState<'calculate' | 'optimize' | 'neighborhood' | null>(null);
   const [optimizationSummary, setOptimizationSummary] = useState<OptimizationSummary | null>(null);
   const [batchDialog, setBatchDialog] = useState(false);
   const [batchText, setBatchText] = useState('');
@@ -612,7 +620,17 @@ export default function InteractiveMap() {
     setIsExporting(true);
     try {
       const XLSX = await import('xlsx');
-      const data = displayCustomers.map((c) => ({
+      const routeOrder = new Map(
+        routingWaypoints.map((waypoint, index) => [waypoint.customer.id, index + 1])
+      );
+      const exportCustomers = routingWaypoints.length > 0
+        ? [...displayCustomers].sort((a, b) =>
+            (routeOrder.get(a.id) || Number.MAX_SAFE_INTEGER)
+            - (routeOrder.get(b.id) || Number.MAX_SAFE_INTEGER)
+          )
+        : displayCustomers;
+      const data = exportCustomers.map((c) => ({
+        'ترتیب مسیر': routeOrder.get(c.id) || '',
         'کد و نام مشتری': c.customerName,
         'نام فروشنده': c.sellerName,
         'مسیر فعلی': c.currentRoute,
@@ -622,6 +640,7 @@ export default function InteractiveMap() {
         'منبع': c.source,
         'عرض جغرافیایی': c.lat,
         'طول جغرافیایی': c.lng,
+        'لینک مسیریابی بلد': userLocation ? buildBaladNavigationUrl(userLocation, c) : '',
       }));
 
       const ws = XLSX.utils.json_to_sheet(data);
@@ -629,8 +648,8 @@ export default function InteractiveMap() {
       XLSX.utils.book_append_sheet(wb, ws, 'مشتریان');
 
       ws['!cols'] = [
-        { wch: 35 }, { wch: 25 }, { wch: 35 }, { wch: 35 },
-        { wch: 20 }, { wch: 50 }, { wch: 10 }, { wch: 15 }, { wch: 15 },
+        { wch: 12 }, { wch: 35 }, { wch: 25 }, { wch: 35 }, { wch: 35 },
+        { wch: 20 }, { wch: 50 }, { wch: 10 }, { wch: 15 }, { wch: 15 }, { wch: 70 },
       ];
 
       XLSX.writeFile(wb, 'tehran_customers.xlsx');
@@ -638,7 +657,7 @@ export default function InteractiveMap() {
       console.error('Export failed:', err);
     }
     setIsExporting(false);
-  }, [displayCustomers]);
+  }, [displayCustomers, routingWaypoints, userLocation]);
 
   // Save customer from dialog
   const handleSaveCustomer = useCallback((data: {
@@ -771,7 +790,49 @@ export default function InteractiveMap() {
     );
   }, []);
 
-  // Calculate route via OSRM
+  const getCurrentUserLocation = useCallback((): Promise<UserLatLng> => {
+    if (!navigator.geolocation) {
+      return Promise.reject(new Error('موقعیت مکانی در این دستگاه در دسترس نیست.'));
+    }
+
+    return new Promise((resolve, reject) => {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          const location: UserLatLng = [
+            position.coords.latitude,
+            position.coords.longitude,
+          ];
+          setUserLocation(location);
+          resolve(location);
+        },
+        () => reject(new Error('برای مسیریابی، دسترسی به موقعیت مکانی را فعال کنید.')),
+        { enableHighAccuracy: true, timeout: 12000, maximumAge: 15000 }
+      );
+    });
+  }, [setUserLocation]);
+
+  const openBaladNavigation = useCallback(async (customer: CustomerPoint) => {
+    const navigationWindow = window.open('about:blank', '_blank');
+    try {
+      const origin = userLocation || await getCurrentUserLocation();
+      const url = buildBaladNavigationUrl(origin, customer);
+      if (navigationWindow) {
+        navigationWindow.opener = null;
+        navigationWindow.location.href = url;
+      } else {
+        window.location.href = url;
+      }
+    } catch (error) {
+      navigationWindow?.close();
+      toast({
+        variant: 'destructive',
+        title: 'مسیریابی بلد باز نشد',
+        description: error instanceof Error ? error.message : 'موقعیت فعلی شما دریافت نشد.',
+      });
+    }
+  }, [getCurrentUserLocation, userLocation]);
+
+  // Draw the selected order with Raah traffic-aware directions
   const calculateRoute = useCallback(async () => {
     if (routingWaypoints.length < 2) return;
     setRoutingLoading(true);
@@ -782,7 +843,7 @@ export default function InteractiveMap() {
       const coords = routingWaypoints
         .map((w) => `${w.customer.lng},${w.customer.lat}`)
         .join(';');
-      const res = await fetch(`/api/osrm/route?coords=${coords}`);
+      const res = await fetch(`/api/raah/route?coords=${encodeURIComponent(coords)}`);
       const data = await res.json();
       if (data.error) {
         throw new Error(data.error);
@@ -807,7 +868,7 @@ export default function InteractiveMap() {
     }
   }, [routingWaypoints, setRouteResult, setRoutingLoading]);
 
-  // Optimize middle stops while keeping the first and last stops fixed
+  // Optimize middle stops, then draw the final route with Raah traffic data
   const optimizeRoute = useCallback(async () => {
     if (routingWaypoints.length < 4) return;
 
@@ -821,8 +882,8 @@ export default function InteractiveMap() {
         .join(';');
 
       const [currentResponse, optimizedResponse] = await Promise.all([
-        fetch(`/api/osrm/route?coords=${coords}`),
-        fetch(`/api/osrm/trip?coords=${coords}`),
+        fetch(`/api/raah/route?coords=${encodeURIComponent(coords)}`),
+        fetch(`/api/osrm/trip?coords=${encodeURIComponent(coords)}`),
       ]);
       const [currentData, optimizedData] = await Promise.all([
         currentResponse.json(),
@@ -839,8 +900,6 @@ export default function InteractiveMap() {
         throw new Error('ترتیب پیشنهادی سرویس معتبر نیست.');
       }
 
-      const originalRoute = currentData.routes[0] as RouteResult;
-      const optimizedRouteResult = optimizedData.route as RouteResult;
       const optimizedCustomers = optimizedData.order.map(
         (inputIndex: number) => routingWaypoints[inputIndex].customer
       );
@@ -848,6 +907,19 @@ export default function InteractiveMap() {
         (inputIndex: number, optimizedIndex: number) => inputIndex !== optimizedIndex
       ).length;
 
+      const optimizedCoords = optimizedCustomers
+        .map((customer: CustomerPoint) => `${customer.lng},${customer.lat}`)
+        .join(';');
+      const optimizedRouteResponse = await fetch(
+        `/api/raah/route?coords=${encodeURIComponent(optimizedCoords)}`
+      );
+      const optimizedRouteData = await optimizedRouteResponse.json();
+      if (!optimizedRouteResponse.ok || optimizedRouteData.error) {
+        throw new Error(optimizedRouteData.error || 'رسم مسیر بهینه با سرویس راه انجام نشد.');
+      }
+
+      const originalRoute = currentData.routes[0] as RouteResult;
+      const optimizedRouteResult = optimizedRouteData.routes[0] as RouteResult;
       setRoutingWaypoints(optimizedCustomers);
       setRouteResult(optimizedRouteResult);
       setOptimizationSummary({
@@ -874,6 +946,94 @@ export default function InteractiveMap() {
       setRoutingAction(null);
     }
   }, [routingWaypoints, setRouteResult, setRoutingLoading, setRoutingWaypoints]);
+
+  // Build an open-ended route for all visible customers in the selected neighborhood.
+  const optimizeNeighborhoodRoute = useCallback(async () => {
+    if (!selectedNeighborhood || displayCustomers.length === 0) return;
+
+    const neighborhoodCustomers = displayCustomers.filter((customer) =>
+      Number.isFinite(customer.lat) && Number.isFinite(customer.lng)
+    );
+    if (neighborhoodCustomers.length === 0) return;
+    if (neighborhoodCustomers.length > 99) {
+      toast({
+        variant: 'destructive',
+        title: 'تعداد مشتریان زیاد است',
+        description: 'برای یک مسیر حداکثر ۹۹ مشتری پشتیبانی می‌شود. لطفاً با فیلتر منبع، مسیر را کوچک‌تر کنید.',
+      });
+      return;
+    }
+
+    setRoutingLoading(true);
+    setRoutingAction('neighborhood');
+    setOptimizationSummary(null);
+    setRouteResult(null);
+
+    try {
+      const origin = await getCurrentUserLocation();
+      const inputCoords = [
+        `${origin[1]},${origin[0]}`,
+        ...neighborhoodCustomers.map((customer) => `${customer.lng},${customer.lat}`),
+      ];
+
+      let optimizedCustomers = neighborhoodCustomers;
+      if (neighborhoodCustomers.length > 1) {
+        const optimizationResponse = await fetch(
+          `/api/osrm/trip?coords=${encodeURIComponent(inputCoords.join(';'))}&destination=any`
+        );
+        const optimizationData = await optimizationResponse.json();
+        if (!optimizationResponse.ok || optimizationData.error) {
+          throw new Error(optimizationData.error || 'ترتیب سریع مشتریان محله پیدا نشد.');
+        }
+        if (!Array.isArray(optimizationData.order) || optimizationData.order.length !== inputCoords.length) {
+          throw new Error('ترتیب پیشنهادی سرویس معتبر نیست.');
+        }
+
+        optimizedCustomers = optimizationData.order
+          .filter((inputIndex: number) => inputIndex !== 0)
+          .map((inputIndex: number) => neighborhoodCustomers[inputIndex - 1])
+          .filter(Boolean);
+      }
+
+      const finalCoords = [
+        `${origin[1]},${origin[0]}`,
+        ...optimizedCustomers.map((customer) => `${customer.lng},${customer.lat}`),
+      ].join(';');
+      const routeResponse = await fetch(
+        `/api/raah/route?coords=${encodeURIComponent(finalCoords)}`
+      );
+      const routeData = await routeResponse.json();
+      if (!routeResponse.ok || routeData.error) {
+        throw new Error(routeData.error || 'مسیر ترافیکی محله از سرویس راه دریافت نشد.');
+      }
+
+      setRoutingMode(true);
+      setRoutingWaypoints(optimizedCustomers);
+      setRouteResult(routeData.routes[0] as RouteResult);
+      toast({
+        title: `مسیر محله ${selectedNeighborhood} آماده شد`,
+        description: `${optimizedCustomers.length.toLocaleString('fa-IR')} مشتری از موقعیت فعلی شما شماره‌گذاری شدند.`,
+      });
+    } catch (error) {
+      console.error('Neighborhood route optimization failed:', error);
+      toast({
+        variant: 'destructive',
+        title: 'ساخت مسیر محله انجام نشد',
+        description: error instanceof Error ? error.message : 'ارتباط با سرویس مسیریابی برقرار نشد.',
+      });
+    } finally {
+      setRoutingLoading(false);
+      setRoutingAction(null);
+    }
+  }, [
+    displayCustomers,
+    getCurrentUserLocation,
+    selectedNeighborhood,
+    setRouteResult,
+    setRoutingLoading,
+    setRoutingMode,
+    setRoutingWaypoints,
+  ]);
 
   // Format distance/duration helpers
   const formatDistance = (m: number) => {
@@ -1159,6 +1319,14 @@ export default function InteractiveMap() {
                     <span className="text-xs text-gray-700 dark:text-gray-300 truncate flex-1" title={wp.customer.customerName}>
                       {wp.customer.customerName}
                     </span>
+                    <button
+                      onClick={() => openBaladNavigation(wp.customer)}
+                      className="text-blue-500 hover:text-blue-700 active:text-blue-900 min-w-[32px] min-h-[32px] flex items-center justify-center transition-colors"
+                      aria-label={`مسیریابی بلد به ${wp.customer.customerName}`}
+                      title="مسیریابی از موقعیت من با بلد"
+                    >
+                      🧭
+                    </button>
                     {idx > 0 && (
                       <button
                         onClick={() => {
@@ -1217,7 +1385,7 @@ export default function InteractiveMap() {
 
             {routingWaypoints.length > 0 && (
               <p className="mt-2 text-[10px] leading-4 text-blue-500 dark:text-blue-400">
-                در بهینه‌سازی، مشتری اول و آخر ثابت می‌مانند و ترتیب توقف‌های میانی تغییر می‌کند. حداقل ۴ مشتری لازم است.
+                شماره‌ها ترتیب مراجعه هستند. آیکن قطب‌نما، مسیر هر مشتری را از موقعیت فعلی شما در بلد باز می‌کند.
               </p>
             )}
 
@@ -1249,6 +1417,9 @@ export default function InteractiveMap() {
                 <div className="flex items-center justify-between">
                   <span className="text-xs text-gray-500">زمان تخمینی</span>
                   <span className="text-sm font-bold text-blue-700 dark:text-blue-400">{formatDuration(routeResult.duration)}</span>
+                </div>
+                <div className="pt-1.5 border-t border-gray-100 dark:border-gray-700 text-[10px] text-emerald-600 dark:text-emerald-400">
+                  مسیر نهایی با اطلاعات ترافیکی راه محاسبه شده است.
                 </div>
                 {routeResult.legs.length > 1 && (
                   <div className="pt-1.5 border-t border-gray-100 dark:border-gray-700">
@@ -1300,18 +1471,33 @@ export default function InteractiveMap() {
           </select>
 
           {selectedDistrict && (
-            <select
-              value={selectedNeighborhood}
-              onChange={(e) => setSelectedNeighborhood(e.target.value || '')}
-              className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 min-h-[44px]"
-            >
-              <option value="">همه محله‌ها</option>
-              {neighborhoodNames
-                .filter((n) => n.district_name === selectedDistrict)
-                .map((n) => (
-                  <option key={n.name} value={n.name}>{n.name}</option>
-                ))}
-            </select>
+            <>
+              <select
+                value={selectedNeighborhood}
+                onChange={(e) => setSelectedNeighborhood(e.target.value || '')}
+                className="w-full px-3 py-2.5 text-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 min-h-[44px]"
+              >
+                <option value="">همه محله‌ها</option>
+                {neighborhoodNames
+                  .filter((n) => n.district_name === selectedDistrict)
+                  .map((n) => (
+                    <option key={n.name} value={n.name}>{n.name}</option>
+                  ))}
+              </select>
+              {selectedNeighborhood && (
+                <button
+                  onClick={optimizeNeighborhoodRoute}
+                  disabled={displayCustomers.length === 0 || routingLoading || loadingCustomers}
+                  className="mt-2 w-full px-3 py-2.5 text-xs font-medium rounded-lg bg-violet-600 hover:bg-violet-700 active:bg-violet-800 text-white transition-colors min-h-[44px] disabled:opacity-50 flex items-center justify-center gap-1.5"
+                >
+                  {routingAction === 'neighborhood' ? (
+                    <><span className="animate-spin inline-block">⟳</span> در حال ساخت مسیر محله...</>
+                  ) : (
+                    <>🚀 سریع‌ترین مسیر این محله ({displayCustomers.length.toLocaleString('fa-IR')} مشتری)</>
+                  )}
+                </button>
+              )}
+            </>
           )}
         </div>
 
@@ -1527,6 +1713,14 @@ export default function InteractiveMap() {
                 <p className="leading-5"><span className="text-gray-500">آدرس:</span> {reportDialog.customer.address}</p>
               )}
             </div>
+
+            <button
+              type="button"
+              onClick={() => openBaladNavigation(reportDialog.customer!)}
+              className="mb-4 w-full min-h-[44px] rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/30 px-3 py-2.5 text-sm font-medium text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-950/50 transition-colors"
+            >
+              🧭 مسیریابی از موقعیت من با بلد
+            </button>
 
             <div className="space-y-3">
               <div>

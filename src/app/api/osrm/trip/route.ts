@@ -9,6 +9,7 @@ interface OsrmWaypoint {
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const coords = searchParams.get('coords');
+  const destination = searchParams.get('destination') === 'any' ? 'any' : 'last';
 
   if (!coords) {
     return NextResponse.json({ error: 'coords parameter is required (lng,lat;lng,lat;...)' }, { status: 400 });
@@ -32,7 +33,7 @@ export async function GET(request: NextRequest) {
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 15000);
-    const osrmUrl = `https://router.project-osrm.org/trip/v1/driving/${coords}?roundtrip=false&source=first&destination=last&overview=full&geometries=geojson&steps=true`;
+    const osrmUrl = `https://router.project-osrm.org/trip/v1/driving/${coords}?roundtrip=false&source=first&destination=${destination}&overview=full&geometries=geojson&steps=true`;
 
     const response = await fetch(osrmUrl, {
       headers: { Accept: 'application/json' },
